@@ -5,11 +5,26 @@ set -euo pipefail
 ROOT="/root/servicectl"
 WATCH_ALL="$(mktemp /tmp/sysvision-watch-all.XXXXXX)"
 WATCH_FILTERED="$(mktemp /tmp/sysvision-watch-filtered.XXXXXX)"
+PIDS=()
+
+start_bg() {
+  "$@" &
+  PIDS+=("$!")
+}
+
+last_pid() {
+  printf '%s\n' "${PIDS[${#PIDS[@]}-1]}"
+}
 
 cleanup() {
-  pkill -f "servicectl serve-api" >/dev/null 2>&1 || true
-  pkill -f "$ROOT/sysvisiond" >/dev/null 2>&1 || true
-  pkill -f "$ROOT/sys-orchestrd" >/dev/null 2>&1 || true
+  local pid
+  for (( idx=${#PIDS[@]}-1; idx>=0; idx-- )); do
+    pid="${PIDS[idx]}"
+    if kill -0 "$pid" >/dev/null 2>&1; then
+      kill "$pid" >/dev/null 2>&1 || true
+      wait "$pid" >/dev/null 2>&1 || true
+    fi
+  done
   rm -f "$WATCH_ALL" "$WATCH_FILTERED"
 }
 trap cleanup EXIT
@@ -32,8 +47,8 @@ go build -o "$ROOT/servicectl" .
 go build -o "$ROOT/sysvisiond" ./cmd/sysvisiond
 
 printf 'Starting servicectl API and sysvisiond...\n'
-"$ROOT/servicectl" serve-api >/tmp/servicectl-api.log 2>&1 &
-"$ROOT/sysvisiond" >/tmp/sysvisiond.log 2>&1 &
+start_bg "$ROOT/servicectl" serve-api >/tmp/servicectl-api.log 2>&1
+start_bg "$ROOT/sysvisiond" >/tmp/sysvisiond.log 2>&1
 sleep 2
 
 printf 'Checking sysvisiond query proxy...\n'
@@ -58,8 +73,8 @@ if [[ "$META_OUTPUT" != *'"servicectl_events_connected": true'* || ! -S /run/ser
 fi
 
 printf 'Checking sysvisiond watch filters...\n'
-timeout 10 curl --silent --no-buffer --unix-socket /run/servicectl/sysvision/sysvisiond.sock "http://unix/v1/watch?source=servicectl" >"$WATCH_ALL" &
-PID_ALL=$!
+start_bg timeout 10 curl --silent --no-buffer --unix-socket /run/servicectl/sysvision/sysvisiond.sock "http://unix/v1/watch?source=servicectl" >"$WATCH_ALL"
+PID_ALL="$(last_pid)"
 for _ in 1 2 3 4 5 6; do
   sleep 1
   printf '%s' '{"source":"servicectl","kind":"unit.command","unit":"munge.service","timestamp":"2026-04-04T00:00:00Z","payload":{"action":"reload","result":"ok"}}' | socat - UNIX-SENDTO:/run/servicectl/servicectl-events.sock
@@ -70,8 +85,8 @@ done
 
 wait "$PID_ALL" || true
 
-timeout 10 curl --silent --no-buffer --unix-socket /run/servicectl/sysvision/sysvisiond.sock "http://unix/v1/watch?source=servicectl&kind=unit.command&unit=munge.service" >"$WATCH_FILTERED" &
-PID_FILTERED=$!
+start_bg timeout 10 curl --silent --no-buffer --unix-socket /run/servicectl/sysvision/sysvisiond.sock "http://unix/v1/watch?source=servicectl&kind=unit.command&unit=munge.service" >"$WATCH_FILTERED"
+PID_FILTERED="$(last_pid)"
 for _ in 1 2 3 4 5 6; do
   sleep 1
   printf '%s' '{"source":"servicectl","kind":"unit.command","unit":"munge.service","timestamp":"2026-04-04T00:00:00Z","payload":{"action":"reload","result":"ok"}}' | socat - UNIX-SENDTO:/run/servicectl/servicectl-events.sock

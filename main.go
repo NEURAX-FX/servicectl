@@ -548,13 +548,21 @@ func formatPIDList(pids []int) string {
 	return strings.Join(parts, ", ")
 }
 
-func cleanupStaleSocketArtifacts(unitName string, socketUnit *SocketUnit) {
+func staleSocketHolderCleanupEnabled() bool {
+	value := strings.TrimSpace(os.Getenv("SERVICECTL_KILL_STALE_SOCKET_HOLDERS"))
+	return value == "1" || strings.EqualFold(value, "true")
+}
+
+func cleanupStaleSocketArtifacts(unitName string, socketUnit *SocketUnit) error {
 	paths := unixSocketListenPaths(socketUnit)
 	if len(paths) == 0 {
-		return
+		return nil
 	}
 	holders := staleSocketHolderPIDs(unitName, socketUnit)
 	if len(holders) > 0 {
+		if !staleSocketHolderCleanupEnabled() {
+			return fmt.Errorf("refusing to kill stale socket holders for %s: %s (set SERVICECTL_KILL_STALE_SOCKET_HOLDERS=1 to force cleanup)", unitName, formatPIDList(holders))
+		}
 		fmt.Printf("%s for %s: %s\n", colorize("Cleaning stale socket holders", styleYellow), unitName, formatPIDList(holders))
 		for _, pid := range holders {
 			_ = syscall.Kill(pid, syscall.SIGTERM)
@@ -564,11 +572,21 @@ func cleanupStaleSocketArtifacts(unitName string, socketUnit *SocketUnit) {
 			_ = syscall.Kill(pid, syscall.SIGKILL)
 		}
 		waitForPIDsToExit(holders, 1500*time.Millisecond)
+		remaining := make([]int, 0, len(holders))
+		for _, pid := range holders {
+			if _, err := os.Stat(filepath.Join("/proc", strconv.Itoa(pid))); err == nil {
+				remaining = append(remaining, pid)
+			}
+		}
+		if len(remaining) > 0 {
+			return fmt.Errorf("stale socket holders for %s still running after cleanup: %s", unitName, formatPIDList(remaining))
+		}
 	}
 	for _, path := range paths {
 		_ = os.Remove(path)
 		_ = os.Remove(path + ".lock")
 	}
+	return nil
 }
 
 func reloadUnit(unitName string) int {
@@ -830,7 +848,10 @@ func recursiveStart(unitName string, visited map[string]bool) bool {
 
 	if shouldManageWithNotifyd(unit, socketUnit) {
 		if !isUnitStarted(cleanName) {
-			cleanupStaleSocketArtifacts(cleanName, socketUnit)
+			if err := cleanupStaleSocketArtifacts(cleanName, socketUnit); err != nil {
+				fmt.Println(err)
+				return false
+			}
 			if !runDinitctl("start", managedServiceName(cleanName)) {
 				return false
 			}

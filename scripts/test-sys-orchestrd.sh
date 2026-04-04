@@ -11,14 +11,26 @@ USER_RUNTIME="/tmp/runtime-0"
 FAKE_CTL="$(mktemp /tmp/fake-servicectl.XXXXXX)"
 CALL_LOG="$(mktemp /tmp/sys-orchestrd-calls.XXXXXX)"
 STATE_FILE="$(mktemp /tmp/sys-orchestrd-state.XXXXXX)"
+PIDS=()
+
+start_bg() {
+  "$@" &
+  PIDS+=("$!")
+}
+
+last_pid() {
+  printf '%s\n' "${PIDS[${#PIDS[@]}-1]}"
+}
 
 cleanup() {
-  pkill -f "servicectl serve-api" >/dev/null 2>&1 || true
-  pkill -f "servicectl --user serve-api" >/dev/null 2>&1 || true
-  pkill -f "$ROOT/sysvisiond" >/dev/null 2>&1 || true
-  pkill -f "$ROOT/sysvisiond --user" >/dev/null 2>&1 || true
-  pkill -f "$ROOT/sys-orchestrd --unit ${UNIT_NAME}.service" >/dev/null 2>&1 || true
-  pkill -f "$ROOT/sys-orchestrd --user --unit ${USER_UNIT_NAME}.service" >/dev/null 2>&1 || true
+  local pid
+  for (( idx=${#PIDS[@]}-1; idx>=0; idx-- )); do
+    pid="${PIDS[idx]}"
+    if kill -0 "$pid" >/dev/null 2>&1; then
+      kill "$pid" >/dev/null 2>&1 || true
+      wait "$pid" >/dev/null 2>&1 || true
+    fi
+  done
   rm -f "$UNIT_PATH" "$USER_UNIT_PATH" "$FAKE_CTL" "$CALL_LOG" "$STATE_FILE"
 }
 trap cleanup EXIT
@@ -64,15 +76,15 @@ EOF
 chmod +x "$FAKE_CTL"
 
 printf 'Starting servicectl API and sysvisiond...\n'
-"$ROOT/servicectl" serve-api >/tmp/servicectl-api.log 2>&1 &
-"$ROOT/sysvisiond" >/tmp/sysvisiond.log 2>&1 &
-XDG_RUNTIME_DIR="$USER_RUNTIME" "$ROOT/servicectl" --user serve-api >/tmp/servicectl-user-api.log 2>&1 &
-XDG_RUNTIME_DIR="$USER_RUNTIME" "$ROOT/sysvisiond" --user >/tmp/sysvisiond-user.log 2>&1 &
+start_bg "$ROOT/servicectl" serve-api >/tmp/servicectl-api.log 2>&1
+start_bg "$ROOT/sysvisiond" >/tmp/sysvisiond.log 2>&1
+start_bg env XDG_RUNTIME_DIR="$USER_RUNTIME" "$ROOT/servicectl" --user serve-api >/tmp/servicectl-user-api.log 2>&1
+start_bg env XDG_RUNTIME_DIR="$USER_RUNTIME" "$ROOT/sysvisiond" --user >/tmp/sysvisiond-user.log 2>&1
 sleep 2
 
 printf 'Checking sys-orchestrd startup and stop path...\n'
-SERVICECTL_BIN="$FAKE_CTL" SYS_ORCHESTRD_STATE_FILE="$STATE_FILE" "$ROOT/sys-orchestrd" --unit "${UNIT_NAME}.service" >/tmp/sys-orchestrd.log 2>&1 &
-ORCH_PID=$!
+start_bg env SERVICECTL_BIN="$FAKE_CTL" SYS_ORCHESTRD_STATE_FILE="$STATE_FILE" "$ROOT/sys-orchestrd" --unit "${UNIT_NAME}.service" >/tmp/sys-orchestrd.log 2>&1
+ORCH_PID="$(last_pid)"
 sleep 2
 assert_contains "$CALL_LOG" "start ${UNIT_NAME}.service"
 kill -TERM "$ORCH_PID"
@@ -82,8 +94,8 @@ assert_contains "$STATE_FILE" "state=stopping"
 
 printf 'Checking sys-orchestrd failure propagation...\n'
 : >"$CALL_LOG"
-SERVICECTL_BIN="$FAKE_CTL" SYS_ORCHESTRD_STATE_FILE="$STATE_FILE" "$ROOT/sys-orchestrd" --unit "${UNIT_NAME}.service" >/tmp/sys-orchestrd.log 2>&1 &
-ORCH_PID=$!
+start_bg env SERVICECTL_BIN="$FAKE_CTL" SYS_ORCHESTRD_STATE_FILE="$STATE_FILE" "$ROOT/sys-orchestrd" --unit "${UNIT_NAME}.service" >/tmp/sys-orchestrd.log 2>&1
+ORCH_PID="$(last_pid)"
 sleep 2
 printf '%s' '{"source":"sys-notifyd","kind":"unit.runtime","unit":"sys-orchestrd-demo.service","timestamp":"2026-04-04T00:00:00Z","payload":{"failure":"boom"}}' | socat - UNIX-SENDTO:/run/servicectl/sysvision/events.sock
 set +e
@@ -98,8 +110,8 @@ assert_contains "$STATE_FILE" "state=failed"
 
 printf 'Checking user-mode sys-orchestrd startup and stop path...\n'
 : >"$CALL_LOG"
-SERVICECTL_BIN="$FAKE_CTL" SYS_ORCHESTRD_STATE_FILE="$STATE_FILE" XDG_RUNTIME_DIR="$USER_RUNTIME" "$ROOT/sys-orchestrd" --user --unit "${USER_UNIT_NAME}.service" >/tmp/sys-orchestrd-user.log 2>&1 &
-ORCH_PID=$!
+start_bg env SERVICECTL_BIN="$FAKE_CTL" SYS_ORCHESTRD_STATE_FILE="$STATE_FILE" XDG_RUNTIME_DIR="$USER_RUNTIME" "$ROOT/sys-orchestrd" --user --unit "${USER_UNIT_NAME}.service" >/tmp/sys-orchestrd-user.log 2>&1
+ORCH_PID="$(last_pid)"
 sleep 2
 assert_contains "$CALL_LOG" "--user start ${USER_UNIT_NAME}.service"
 if kill -0 "$ORCH_PID" >/dev/null 2>&1; then

@@ -35,6 +35,12 @@ cleanup() {
   if [[ -d "$BACKUP_DIR/system.service" ]]; then
     cp -a "$BACKUP_DIR/system.service" "$SYSTEM_SERVICE_DIR"
   fi
+  if [[ -d "$BACKUP_DIR/system.sysvisiond" ]]; then
+    cp -a "$BACKUP_DIR/system.sysvisiond" "$SYSTEM_SYSVISION_DIR"
+  fi
+  if [[ -d "$BACKUP_DIR/system.api" ]]; then
+    cp -a "$BACKUP_DIR/system.api" "$SYSTEM_API_DIR"
+  fi
   if [[ -f "$BACKUP_DIR/user.default.contents" ]]; then
     mkdir -p "$(dirname "$USER_DEFAULT_CONTENTS")"
     cp "$BACKUP_DIR/user.default.contents" "$USER_DEFAULT_CONTENTS"
@@ -47,6 +53,12 @@ cleanup() {
   fi
   if [[ -d "$BACKUP_DIR/user.service" ]]; then
     cp -a "$BACKUP_DIR/user.service" "$USER_SERVICE_DIR"
+  fi
+  if [[ -d "$BACKUP_DIR/user.sysvisiond" ]]; then
+    cp -a "$BACKUP_DIR/user.sysvisiond" "$USER_SYSVISION_DIR"
+  fi
+  if [[ -d "$BACKUP_DIR/user.api" ]]; then
+    cp -a "$BACKUP_DIR/user.api" "$USER_API_DIR"
   fi
   rm -f "$SYSTEM_UNIT_PATH" "$USER_UNIT_PATH"
   rm -rf "$BACKUP_DIR"
@@ -73,6 +85,12 @@ fi
 if [[ -d "$SYSTEM_SERVICE_DIR" ]]; then
   cp -a "$SYSTEM_SERVICE_DIR" "$BACKUP_DIR/system.service"
 fi
+if [[ -d "$SYSTEM_SYSVISION_DIR" ]]; then
+  cp -a "$SYSTEM_SYSVISION_DIR" "$BACKUP_DIR/system.sysvisiond"
+fi
+if [[ -d "$SYSTEM_API_DIR" ]]; then
+  cp -a "$SYSTEM_API_DIR" "$BACKUP_DIR/system.api"
+fi
 
 mkdir -p "$USER_ROOT" "$(dirname "$USER_UNIT_PATH")" "$USER_BACKEND_ROOT"
 if [[ -f "$USER_DEFAULT_CONTENTS" ]]; then
@@ -83,6 +101,12 @@ if [[ -d "$USER_BUNDLE_DIR" ]]; then
 fi
 if [[ -d "$USER_SERVICE_DIR" ]]; then
   cp -a "$USER_SERVICE_DIR" "$BACKUP_DIR/user.service"
+fi
+if [[ -d "$USER_SYSVISION_DIR" ]]; then
+  cp -a "$USER_SYSVISION_DIR" "$BACKUP_DIR/user.sysvisiond"
+fi
+if [[ -d "$USER_API_DIR" ]]; then
+  cp -a "$USER_API_DIR" "$BACKUP_DIR/user.api"
 fi
 
 cat >"$SYSTEM_UNIT_PATH" <<'EOF'

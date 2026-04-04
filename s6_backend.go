@@ -327,10 +327,18 @@ func enableWithS6(unitName string) error {
 		return err
 	}
 	if s6LiveEnabled() {
-		_ = liveUpdateS6()
-		_ = liveStartS6(s6ServicectlAPIServiceName())
-		_ = liveStartS6(s6SysvisiondServiceName())
-		_ = liveStartS6(serviceName)
+		if err := liveUpdateS6(); err != nil {
+			return err
+		}
+		if err := liveStartS6(s6ServicectlAPIServiceName()); err != nil {
+			return err
+		}
+		if err := liveStartS6(s6SysvisiondServiceName()); err != nil {
+			return err
+		}
+		if err := liveStartS6(serviceName); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -341,7 +349,9 @@ func disableWithS6(unitName string) error {
 	}
 	serviceName := s6OrchestrdServiceName(unitName)
 	if s6LiveEnabled() {
-		_ = liveStopS6(serviceName)
+		if err := liveStopS6(serviceName); err != nil {
+			return err
+		}
 	}
 	entries, _ := os.ReadFile(s6BundleContentsPath())
 	bundleEntries := uniqueSortedLines(string(entries))
@@ -365,7 +375,9 @@ func disableWithS6(unitName string) error {
 		return err
 	}
 	if s6LiveEnabled() {
-		_ = liveUpdateS6()
+		if err := liveUpdateS6(); err != nil {
+			return err
+		}
 	}
 	return nil
 }

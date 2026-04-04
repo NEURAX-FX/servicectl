@@ -61,7 +61,7 @@ sleep 1
 kill -0 "$BLOCKER_PID"
 
 printf 'Starting servicectl-managed socket service...\n'
-XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/runtime-0}" "$ROOT/servicectl" --user start "$UNIT_NAME" >"$START_OUTPUT"
+SERVICECTL_KILL_STALE_SOCKET_HOLDERS=1 XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/runtime-0}" "$ROOT/servicectl" --user start "$UNIT_NAME" >"$START_OUTPUT"
 sleep 1
 
 assert_contains "$START_OUTPUT" "Cleaning stale socket holders for ${UNIT_NAME}: ${BLOCKER_PID}"

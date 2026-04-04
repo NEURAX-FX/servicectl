@@ -27,6 +27,7 @@ type config struct {
 	serviceType  string
 	command      string
 	stopCommand  string
+	userMode     bool
 	verbose      bool
 	readyFD      int
 	startNow     bool
@@ -176,6 +177,7 @@ func parseFlags() config {
 	flag.StringVar(&cfg.serviceType, "service-type", "simple", "service type: simple, exec, forking, oneshot, notify")
 	flag.StringVar(&cfg.command, "command", "", "backend command launched under /bin/sh -c")
 	flag.StringVar(&cfg.stopCommand, "stop-command", "", "optional stop command launched under /bin/sh -c with MAINPID set")
+	flag.BoolVar(&cfg.userMode, "user", false, "publish runtime events to the user-mode control plane")
 	flag.BoolVar(&cfg.verbose, "verbose", false, "enable backend launch logging")
 	flag.IntVar(&cfg.readyFD, "ready-fd", 1, "file descriptor used for readiness message, 1 for stdout, 2 for stderr")
 	flag.BoolVar(&cfg.startNow, "start-now", false, "start backend immediately after activation sockets are prepared")
@@ -1187,7 +1189,7 @@ func (s *server) publishVisionEventLocked(event string) {
 	if err != nil {
 		return
 	}
-	addr := &net.UnixAddr{Name: visionapi.SystemNotifydIngressSocketPath(), Net: "unixgram"}
+	addr := &net.UnixAddr{Name: visionapi.SysvisionIngressSocketPath(s.cfg.userMode, os.Getenv("XDG_RUNTIME_DIR")), Net: "unixgram"}
 	conn, err := net.DialUnix("unixgram", nil, addr)
 	if err != nil {
 		return

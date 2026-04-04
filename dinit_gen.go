@@ -335,6 +335,9 @@ func (u *Unit) GenerateNotifydDinit(socketUnit *SocketUnit) string {
 	backendCmd := compileExecStart(u, backendEnv)
 	backendCmd = buildEnvPrefix(backendEnv) + backendCmd
 	args := []string{notifydBinaryPath(), "-service", dinitArg(u.Name), "-service-type", dinitArg(strings.ToLower(u.Type)), "-command", dinitArg(backendCmd), "-state-file", dinitArg(notifydStatePath(u.Name))}
+	if userMode() {
+		args = append(args, "-user")
+	}
 	if stopCmd := compileExecStop(u, backendEnv); stopCmd != "" {
 		args = append(args, "-stop-command", dinitArg(stopCmd))
 	}

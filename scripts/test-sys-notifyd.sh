@@ -7,13 +7,26 @@ BIN="$ROOT/sys-notifyd"
 SLEEPER="$ROOT/notify-sleeper"
 ECHOD="$ROOT/notify-echod"
 WORKDIR="$(mktemp -d /tmp/sys-notifyd-test.XXXXXX)"
+PIDS=()
+
+start_bg() {
+  "$@" &
+  PIDS+=("$!")
+}
+
+last_pid() {
+  printf '%s\n' "${PIDS[${#PIDS[@]}-1]}"
+}
 
 cleanup() {
-  pkill -f "$BIN -service notify-only-test" >/dev/null 2>&1 || true
-  pkill -f "$BIN -service socket-notify-test" >/dev/null 2>&1 || true
-  pkill -f "$BIN -service socket-restart-test" >/dev/null 2>&1 || true
-  pkill -f "$BIN -service extend-test" >/dev/null 2>&1 || true
-  pkill -f "$BIN -service watchdog-test" >/dev/null 2>&1 || true
+  local pid
+  for (( idx=${#PIDS[@]}-1; idx>=0; idx-- )); do
+    pid="${PIDS[idx]}"
+    if kill -0 "$pid" >/dev/null 2>&1; then
+      kill "$pid" >/dev/null 2>&1 || true
+      wait "$pid" >/dev/null 2>&1 || true
+    fi
+  done
   rm -rf "$WORKDIR"
 }
 trap cleanup EXIT
@@ -35,8 +48,8 @@ go build -o "$ROOT/notify-echod" ./cmd/notify-echod
 printf 'Test 1: notify-only lifecycle...\n'
 NOTIFY_LOG="$WORKDIR/notify-only.log"
 STOP_MARKER="$WORKDIR/notify-only.stopped"
-"$BIN" -service notify-only-test -service-type notify -command "$SLEEPER" -stop-command "/bin/sh -c 'touch \"$STOP_MARKER\"; kill -TERM \"\$MAINPID\"'" -ready-timeout 5s -stop-timeout 5s -notify -notify-path "$WORKDIR/notify-only.sock" -start-now >"$NOTIFY_LOG" 2>&1 &
-NOTIFY_PID=$!
+start_bg "$BIN" -service notify-only-test -service-type notify -command "$SLEEPER" -stop-command "/bin/sh -c 'touch \"$STOP_MARKER\"; kill -TERM \"\$MAINPID\"'" -ready-timeout 5s -stop-timeout 5s -notify -notify-path "$WORKDIR/notify-only.sock" -start-now >"$NOTIFY_LOG" 2>&1
+NOTIFY_PID="$(last_pid)"
 sleep 1
 assert_contains "$NOTIFY_LOG" "READY=1"
 assert_contains "$NOTIFY_LOG" "status: notify-sleeper running"
@@ -53,8 +66,8 @@ fi
 printf 'Test 2: socket + notify activation...\n'
 SOCKET_PATH="$WORKDIR/echo.sock"
 SOCKET_LOG="$WORKDIR/socket-notify.log"
-"$BIN" -service socket-notify-test -service-type notify -command "$ECHOD" -ready-timeout 5s -notify -notify-path "$WORKDIR/socket-notify.sock" -listen "unix:$SOCKET_PATH" -fdname api -socket-mode 0666 >"$SOCKET_LOG" 2>&1 &
-SOCKET_PID=$!
+start_bg "$BIN" -service socket-notify-test -service-type notify -command "$ECHOD" -ready-timeout 5s -notify -notify-path "$WORKDIR/socket-notify.sock" -listen "unix:$SOCKET_PATH" -fdname api -socket-mode 0666 >"$SOCKET_LOG" 2>&1
+SOCKET_PID="$(last_pid)"
 sleep 1
 assert_contains "$SOCKET_LOG" "READY=1"
 assert_contains "$SOCKET_LOG" "ready: service=socket-notify-test sockets=1"
@@ -82,9 +95,8 @@ fi
 printf 'Test 3: socket backend restart on next traffic...\n'
 RESTART_PATH="$WORKDIR/restart.sock"
 RESTART_LOG="$WORKDIR/socket-restart.log"
-env NOTIFY_ECHOD_EXIT_AFTER_ACCEPT=1 \
-  "$BIN" -service socket-restart-test -service-type notify -command "env NOTIFY_ECHOD_EXIT_AFTER_ACCEPT=1 $ECHOD" -ready-timeout 5s -notify -notify-path "$WORKDIR/socket-restart.sock" -listen "unix:$RESTART_PATH" -fdname api -socket-mode 0666 >"$RESTART_LOG" 2>&1 &
-RESTART_PID=$!
+start_bg env NOTIFY_ECHOD_EXIT_AFTER_ACCEPT=1 "$BIN" -service socket-restart-test -service-type notify -command "env NOTIFY_ECHOD_EXIT_AFTER_ACCEPT=1 $ECHOD" -ready-timeout 5s -notify -notify-path "$WORKDIR/socket-restart.sock" -listen "unix:$RESTART_PATH" -fdname api -socket-mode 0666 >"$RESTART_LOG" 2>&1
+RESTART_PID="$(last_pid)"
 sleep 1
 FIRST_RESPONSE="$(printf '' | socat - UNIX-CONNECT:"$RESTART_PATH")"
 SECOND_RESPONSE="$(printf '' | socat - UNIX-CONNECT:"$RESTART_PATH")"
@@ -103,9 +115,8 @@ wait "$RESTART_PID"
 
 printf 'Test 4: notify startup timeout extension...\n'
 EXTEND_LOG="$WORKDIR/extend.log"
-env NOTIFY_EXTEND_START_USEC=1200000 NOTIFY_EXTEND_INTERVAL_USEC=200000 \
-  "$BIN" -service extend-test -service-type notify -command "env NOTIFY_EXTEND_START_USEC=1200000 NOTIFY_EXTEND_INTERVAL_USEC=200000 $SLEEPER" -ready-timeout 500ms -notify -notify-path "$WORKDIR/extend.sock" -start-now >"$EXTEND_LOG" 2>&1 &
-EXTEND_PID=$!
+start_bg env NOTIFY_EXTEND_START_USEC=1200000 NOTIFY_EXTEND_INTERVAL_USEC=200000 "$BIN" -service extend-test -service-type notify -command "env NOTIFY_EXTEND_START_USEC=1200000 NOTIFY_EXTEND_INTERVAL_USEC=200000 $SLEEPER" -ready-timeout 500ms -notify -notify-path "$WORKDIR/extend.sock" -start-now >"$EXTEND_LOG" 2>&1
+EXTEND_PID="$(last_pid)"
 sleep 2
 assert_contains "$EXTEND_LOG" "extended start timeout"
 assert_contains "$EXTEND_LOG" "READY=1"
@@ -114,8 +125,8 @@ wait "$EXTEND_PID"
 
 printf 'Test 5: notify watchdog keepalive...\n'
 WATCHDOG_LOG="$WORKDIR/watchdog.log"
-"$BIN" -service watchdog-test -service-type notify -command "env NOTIFY_WATCHDOG_USEC=500000 $SLEEPER" -ready-timeout 5s -notify -notify-path "$WORKDIR/watchdog.sock" -start-now >"$WATCHDOG_LOG" 2>&1 &
-WATCHDOG_PID=$!
+start_bg "$BIN" -service watchdog-test -service-type notify -command "env NOTIFY_WATCHDOG_USEC=500000 $SLEEPER" -ready-timeout 5s -notify -notify-path "$WORKDIR/watchdog.sock" -start-now >"$WATCHDOG_LOG" 2>&1
+WATCHDOG_PID="$(last_pid)"
 sleep 2
 assert_contains "$WATCHDOG_LOG" "watchdog interval set to 500ms"
 assert_contains "$WATCHDOG_LOG" "READY=1"
