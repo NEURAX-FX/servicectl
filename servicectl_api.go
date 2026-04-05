@@ -64,7 +64,9 @@ func (h *servicectlEventHub) publish(event visionapi.EventEnvelope) {
 
 func (h *servicectlEventHub) serveIngress() error {
 	socketPath := visionapi.ServicectlEventsSocketPath(userMode(), runtimeDir())
-	_ = os.Remove(socketPath)
+	if err := visionapi.PrepareUnixDatagramListener(socketPath); err != nil {
+		return err
+	}
 	conn, err := net.ListenUnixgram("unixgram", &net.UnixAddr{Name: socketPath, Net: "unixgram"})
 	if err != nil {
 		return err
@@ -216,7 +218,10 @@ func servicectlAPIServer() int {
 		fmt.Println(oneLineError("create servicectl runtime directory", err))
 		return 1
 	}
-	_ = os.Remove(socketPath)
+	if err := visionapi.PrepareUnixStreamListener(socketPath); err != nil {
+		fmt.Println(oneLineError("prepare servicectl api socket", err))
+		return 1
+	}
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
 		fmt.Println(oneLineError("listen on servicectl api socket", err))
