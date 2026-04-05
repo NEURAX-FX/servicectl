@@ -70,7 +70,10 @@ func currentBusMeta() busMeta {
 	if !ok {
 		return busMeta{available: false}
 	}
-	return busMeta{available: true, connected: meta.ServicectlEventsConnected, errorText: meta.ServicectlEventsError}
+	if userMode() {
+		return busMeta{available: true, connected: meta.UserServicectlEventsConnected, errorText: meta.UserServicectlEventsError}
+	}
+	return busMeta{available: true, connected: meta.SystemServicectlEventsConnected, errorText: meta.SystemServicectlEventsError}
 }
 
 func currentBusState() string {

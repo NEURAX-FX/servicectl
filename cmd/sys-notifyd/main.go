@@ -1184,7 +1184,7 @@ func (s *server) publishVisionEventLocked(event string) {
 		"main_pid":     strconv.Itoa(s.mainPID),
 		"socket_count": strconv.Itoa(len(s.sockets)),
 	}
-	envelope := visionapi.NewEvent(visionapi.SourceSysNotifyd, visionapi.KindUnitRuntime, s.cfg.serviceName, payload)
+	envelope := visionapi.NewEvent(visionapi.ModeForUser(s.cfg.userMode), visionapi.SourceSysNotifyd, visionapi.KindUnitRuntime, s.cfg.serviceName, payload)
 	data, err := json.Marshal(envelope)
 	if err != nil {
 		return

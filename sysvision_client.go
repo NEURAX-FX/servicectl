@@ -12,8 +12,10 @@ import (
 )
 
 type sysvisionMetaResponse struct {
-	ServicectlEventsConnected bool   `json:"servicectl_events_connected"`
-	ServicectlEventsError     string `json:"servicectl_events_error,omitempty"`
+	SystemServicectlEventsConnected bool   `json:"system_servicectl_events_connected"`
+	SystemServicectlEventsError     string `json:"system_servicectl_events_error,omitempty"`
+	UserServicectlEventsConnected   bool   `json:"user_servicectl_events_connected"`
+	UserServicectlEventsError       string `json:"user_servicectl_events_error,omitempty"`
 }
 
 func sysvisionAvailable() bool {

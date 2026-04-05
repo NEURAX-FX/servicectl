@@ -218,9 +218,6 @@ func ensureServicectlAPISource() error {
 		return err
 	}
 	runLine := servicectlBinaryPath()
-	if userMode() {
-		runLine += " --user"
-	}
 	runLine += " serve-api"
 	runScript := strings.Join([]string{"#!/usr/bin/execlineb -P", runLine, ""}, "\n")
 	if err := os.WriteFile(filepath.Join(serviceDir, "run"), []byte(runScript), 0755); err != nil {
@@ -238,9 +235,6 @@ func ensureSysvisiondSource() error {
 		return err
 	}
 	runLine := sysvisiondBinaryPath()
-	if userMode() {
-		runLine += " --user"
-	}
 	runScript := strings.Join([]string{"#!/usr/bin/execlineb -P", runLine, ""}, "\n")
 	if err := os.WriteFile(filepath.Join(serviceDir, "run"), []byte(runScript), 0755); err != nil {
 		return err

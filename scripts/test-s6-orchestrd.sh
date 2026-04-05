@@ -134,8 +134,8 @@ assert_contains "$USER_DEFAULT_CONTENTS" "sysvisiond"
 assert_contains "$USER_DEFAULT_CONTENTS" "servicectl-api"
 assert_contains "$USER_SERVICE_DIR/type" "longrun"
 assert_contains "$USER_SERVICE_DIR/run" "sys-orchestrd --user --unit ${USER_UNIT_NAME}.service"
-assert_contains "$USER_SYSVISION_DIR/run" "sysvisiond --user"
-assert_contains "$USER_API_DIR/run" "servicectl --user serve-api"
+assert_contains "$USER_SYSVISION_DIR/run" "sysvisiond"
+assert_contains "$USER_API_DIR/run" "servicectl serve-api"
 
 printf 'Checking user is-enabled output...\n'
 USER_ENABLED_OUTPUT="$(XDG_RUNTIME_DIR="$USER_RUNTIME" "$ROOT/servicectl" --user is-enabled "$USER_UNIT_NAME" || true)"

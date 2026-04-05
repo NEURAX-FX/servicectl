@@ -21,6 +21,12 @@ type eventSubscriber struct {
 	ch chan visionapi.EventEnvelope
 }
 
+type servicectlPlaneServer struct {
+	mode string
+	cfg  Config
+	hub  *servicectlEventHub
+}
+
 type servicectlEventHub struct {
 	mu     sync.Mutex
 	nextID int
@@ -62,8 +68,7 @@ func (h *servicectlEventHub) publish(event visionapi.EventEnvelope) {
 	}
 }
 
-func (h *servicectlEventHub) serveIngress() error {
-	socketPath := visionapi.ServicectlEventsSocketPath(userMode(), runtimeDir())
+func (h *servicectlEventHub) serveIngress(mode string, socketPath string) error {
 	if err := visionapi.PrepareUnixDatagramListener(socketPath); err != nil {
 		return err
 	}
@@ -86,11 +91,19 @@ func (h *servicectlEventHub) serveIngress() error {
 		if err := json.Unmarshal(buf[:n], &event); err != nil {
 			continue
 		}
+		if strings.TrimSpace(event.Mode) == "" {
+			event.Mode = visionapi.PlaneForMode(mode).Mode
+		}
 		h.publish(event)
 	}
 }
 
-func buildUnitSnapshot(unitName string) (visionapi.UnitSnapshot, error) {
+func buildUnitSnapshot(cfg Config, unitName string) (visionapi.UnitSnapshot, error) {
+	previous := config
+	config = cfg
+	defer func() {
+		config = previous
+	}()
 	unit, err := parseSystemdUnit(unitName)
 	if err != nil {
 		return visionapi.UnitSnapshot{}, err
@@ -123,7 +136,7 @@ func buildUnitSnapshot(unitName string) (visionapi.UnitSnapshot, error) {
 	return visionapi.UnitSnapshot{
 		Name:         unitName,
 		Description:  unit.Description,
-		Mode:         config.Mode,
+		Mode:         cfg.Mode,
 		SourcePath:   unit.SourcePath,
 		ManagedBy:    managedBy,
 		DinitName:    dinitName,
@@ -143,10 +156,10 @@ func buildUnitSnapshot(unitName string) (visionapi.UnitSnapshot, error) {
 	}, nil
 }
 
-func discoverSystemdUnits() []string {
+func discoverSystemdUnits(cfg Config) []string {
 	seen := make(map[string]bool)
 	units := make([]string, 0, 32)
-	for _, base := range config.SystemdPaths {
+	for _, base := range cfg.SystemdPaths {
 		entries, err := os.ReadDir(base)
 		if err != nil {
 			continue
@@ -168,12 +181,12 @@ func discoverSystemdUnits() []string {
 	return units
 }
 
-func collectUnitSnapshots() visionapi.UnitsResponse {
-	units := discoverSystemdUnits()
+func collectUnitSnapshots(cfg Config) visionapi.UnitsResponse {
+	units := discoverSystemdUnits(cfg)
 	result := visionapi.UnitsResponse{GeneratedAt: time.Now().UTC().Format(time.RFC3339Nano)}
 	result.Units = make([]visionapi.UnitSnapshot, 0, len(units))
 	for _, unitName := range units {
-		snapshot, err := buildUnitSnapshot(unitName)
+		snapshot, err := buildUnitSnapshot(cfg, unitName)
 		if err != nil {
 			continue
 		}
@@ -194,7 +207,7 @@ func writeEvent(w io.Writer, event visionapi.EventEnvelope) error {
 }
 
 func publishServicectlEvent(event visionapi.EventEnvelope) {
-	addr := &net.UnixAddr{Name: visionapi.ServicectlEventsSocketPath(userMode(), runtimeDir()), Net: "unixgram"}
+	addr := &net.UnixAddr{Name: visionapi.ServicectlEventsSocketPathForMode(event.Mode), Net: "unixgram"}
 	conn, err := net.DialUnix("unixgram", nil, addr)
 	if err != nil {
 		return
@@ -209,45 +222,25 @@ func publishServicectlEvent(event visionapi.EventEnvelope) {
 
 func publishServicectlCommandEvent(action string, unitName string, result string) {
 	payload := map[string]string{"action": action, "result": result}
-	publishServicectlEvent(visionapi.NewEvent(visionapi.SourceServicectl, visionapi.KindUnitCommand, unitName, payload))
+	publishServicectlEvent(visionapi.NewEvent(config.Mode, visionapi.SourceServicectl, visionapi.KindUnitCommand, unitName, payload))
 }
 
-func servicectlAPIServer() int {
-	socketPath := visionapi.ServicectlSocketPath(userMode(), runtimeDir())
-	if err := os.MkdirAll(filepath.Dir(socketPath), 0755); err != nil {
-		fmt.Println(oneLineError("create servicectl runtime directory", err))
-		return 1
+func newServicectlPlaneServer(mode string, hub *servicectlEventHub) servicectlPlaneServer {
+	return servicectlPlaneServer{
+		mode: visionapi.PlaneForMode(mode).Mode,
+		cfg:  buildConfig(strings.EqualFold(strings.TrimSpace(mode), visionapi.ModeUser)),
+		hub:  hub,
 	}
-	if err := visionapi.PrepareUnixStreamListener(socketPath); err != nil {
-		fmt.Println(oneLineError("prepare servicectl api socket", err))
-		return 1
-	}
-	listener, err := net.Listen("unix", socketPath)
-	if err != nil {
-		fmt.Println(oneLineError("listen on servicectl api socket", err))
-		return 1
-	}
-	defer func() {
-		_ = listener.Close()
-		_ = os.Remove(socketPath)
-	}()
-	if err := os.Chmod(socketPath, 0660); err != nil {
-		fmt.Println(oneLineError("chmod servicectl api socket", err))
-		return 1
-	}
-	hub := newServicectlEventHub()
-	go func() {
-		if err := hub.serveIngress(); err != nil {
-			fmt.Println(oneLineError("servicectl event ingress failed", err))
-		}
-	}()
+}
+
+func (s servicectlPlaneServer) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/units", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
-		writeJSON(w, collectUnitSnapshots())
+		writeJSON(w, collectUnitSnapshots(s.cfg))
 	})
 	mux.HandleFunc("/v1/events", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -259,8 +252,9 @@ func servicectlAPIServer() int {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
-		id, ch := hub.subscribe()
-		defer hub.unsubscribe(id)
+		filter := visionapi.WatchFilter{Mode: strings.TrimSpace(r.URL.Query().Get("mode"))}
+		id, ch := s.hub.subscribe()
+		defer s.hub.unsubscribe(id)
 		w.Header().Set("Content-Type", "application/x-ndjson")
 		w.WriteHeader(http.StatusOK)
 		flusher.Flush()
@@ -273,6 +267,9 @@ func servicectlAPIServer() int {
 			case event, ok := <-ch:
 				if !ok {
 					return
+				}
+				if !filter.Matches(event) {
+					continue
 				}
 				if err := writeEvent(writer, event); err != nil {
 					return
@@ -295,7 +292,7 @@ func servicectlAPIServer() int {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		snapshot, err := buildUnitSnapshot(name)
+		snapshot, err := buildUnitSnapshot(s.cfg, name)
 		if err != nil {
 			w.WriteHeader(http.StatusNotFound)
 			writeJSON(w, map[string]string{"error": err.Error()})
@@ -303,8 +300,70 @@ func servicectlAPIServer() int {
 		}
 		writeJSON(w, snapshot)
 	})
-	server := &http.Server{Handler: mux}
+	return mux
+}
+
+func (s servicectlPlaneServer) apiSocketPath() string {
+	return visionapi.ServicectlSocketPathForMode(s.mode)
+}
+
+func (s servicectlPlaneServer) ingressSocketPath() string {
+	return visionapi.ServicectlEventsSocketPathForMode(s.mode)
+}
+
+func (s servicectlPlaneServer) serveIngress() error {
+	for {
+		if err := s.hub.serveIngress(s.mode, s.ingressSocketPath()); err != nil {
+			fmt.Println(oneLineError(s.mode+" servicectl event ingress failed", err))
+			time.Sleep(time.Second)
+		}
+	}
+}
+
+func (s servicectlPlaneServer) serveAPI() error {
+	socketPath := s.apiSocketPath()
+	if err := os.MkdirAll(filepath.Dir(socketPath), 0755); err != nil {
+		return fmt.Errorf("create servicectl runtime directory: %w", err)
+	}
+	if err := visionapi.PrepareUnixStreamListener(socketPath); err != nil {
+		return fmt.Errorf("prepare servicectl api socket: %w", err)
+	}
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		return fmt.Errorf("listen on servicectl api socket: %w", err)
+	}
+	defer func() {
+		_ = listener.Close()
+		_ = os.Remove(socketPath)
+	}()
+	if err := os.Chmod(socketPath, 0660); err != nil {
+		return fmt.Errorf("chmod servicectl api socket: %w", err)
+	}
+	server := &http.Server{Handler: s.handler()}
 	if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
+		return err
+	}
+	return nil
+}
+
+func servicectlAPIServer() int {
+	hub := newServicectlEventHub()
+	servers := []servicectlPlaneServer{
+		newServicectlPlaneServer(visionapi.ModeSystem, hub),
+		newServicectlPlaneServer(visionapi.ModeUser, hub),
+	}
+	errCh := make(chan error, len(servers)*2)
+	for _, server := range servers {
+		server := server
+		go func() {
+			errCh <- server.serveIngress()
+		}()
+		go func() {
+			errCh <- server.serveAPI()
+		}()
+	}
+	err := <-errCh
+	if err != nil {
 		fmt.Println(oneLineError("servicectl api server failed", err))
 		return 1
 	}

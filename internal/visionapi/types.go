@@ -9,6 +9,8 @@ import (
 )
 
 const (
+	ModeSystem                 = "system"
+	ModeUser                   = "user"
 	SystemRuntimeDir           = "/run/servicectl"
 	SystemServicectlSockName   = "servicectl.sock"
 	SystemServicectlEventsName = "servicectl-events.sock"
@@ -24,11 +26,52 @@ const (
 	KindUnitQuery              = "unit.query"
 )
 
+type Plane struct {
+	Mode       string
+	RuntimeDir string
+}
+
+func Planes() []Plane {
+	return []Plane{SystemPlane(), UserPlane()}
+}
+
+func SystemPlane() Plane {
+	return Plane{Mode: ModeSystem, RuntimeDir: RuntimeDir(false, "")}
+}
+
+func UserPlane() Plane {
+	return Plane{Mode: ModeUser, RuntimeDir: RuntimeDir(true, "")}
+}
+
+func PlaneForMode(mode string) Plane {
+	if strings.EqualFold(strings.TrimSpace(mode), ModeUser) {
+		return UserPlane()
+	}
+	return SystemPlane()
+}
+
+func ModeForUser(userMode bool) string {
+	if userMode {
+		return ModeUser
+	}
+	return ModeSystem
+}
+
 func SystemServicectlSocketPath() string {
 	return filepath.Join(SystemRuntimeDir, SystemServicectlSockName)
 }
 
 func RuntimeDir(userMode bool, xdgRuntimeDir string) string {
+	if userMode {
+		if override := strings.TrimSpace(os.Getenv("SERVICECTL_USER_RUNTIME_ROOT")); override != "" {
+			return override
+		}
+	}
+	if !userMode {
+		if override := strings.TrimSpace(os.Getenv("SERVICECTL_SYSTEM_RUNTIME_ROOT")); override != "" {
+			return override
+		}
+	}
 	if userMode {
 		return filepath.Join("/run/user", strconv.Itoa(os.Getuid()), "servicectl")
 	}
@@ -39,12 +82,20 @@ func ServicectlSocketPath(userMode bool, xdgRuntimeDir string) string {
 	return filepath.Join(RuntimeDir(userMode, xdgRuntimeDir), SystemServicectlSockName)
 }
 
+func ServicectlSocketPathForMode(mode string) string {
+	return filepath.Join(PlaneForMode(mode).RuntimeDir, SystemServicectlSockName)
+}
+
 func SystemServicectlEventsSocketPath() string {
 	return filepath.Join(SystemRuntimeDir, SystemServicectlEventsName)
 }
 
 func ServicectlEventsSocketPath(userMode bool, xdgRuntimeDir string) string {
 	return filepath.Join(RuntimeDir(userMode, xdgRuntimeDir), SystemServicectlEventsName)
+}
+
+func ServicectlEventsSocketPathForMode(mode string) string {
+	return filepath.Join(PlaneForMode(mode).RuntimeDir, SystemServicectlEventsName)
 }
 
 func SystemSysvisionDir() string {
@@ -55,6 +106,10 @@ func SysvisionDir(userMode bool, xdgRuntimeDir string) string {
 	return filepath.Join(RuntimeDir(userMode, xdgRuntimeDir), SysvisionDirName)
 }
 
+func SysvisionDirForMode(mode string) string {
+	return filepath.Join(PlaneForMode(mode).RuntimeDir, SysvisionDirName)
+}
+
 func SystemSysvisionSocketPath() string {
 	return filepath.Join(SystemSysvisionDir(), SystemSysvisionSockName)
 }
@@ -63,12 +118,20 @@ func SysvisionSocketPath(userMode bool, xdgRuntimeDir string) string {
 	return filepath.Join(SysvisionDir(userMode, xdgRuntimeDir), SystemSysvisionSockName)
 }
 
+func SysvisionSocketPathForMode(mode string) string {
+	return filepath.Join(SysvisionDirForMode(mode), SystemSysvisionSockName)
+}
+
 func SystemSysvisionIngressSocketPath() string {
 	return filepath.Join(SystemSysvisionDir(), SysvisionIngressSockName)
 }
 
 func SysvisionIngressSocketPath(userMode bool, xdgRuntimeDir string) string {
 	return filepath.Join(SysvisionDir(userMode, xdgRuntimeDir), SysvisionIngressSockName)
+}
+
+func SysvisionIngressSocketPathForMode(mode string) string {
+	return filepath.Join(SysvisionDirForMode(mode), SysvisionIngressSockName)
 }
 
 func SystemNotifydIngressSocketPath() string {
@@ -105,6 +168,7 @@ type UnitsResponse struct {
 type EventEnvelope struct {
 	Source    string            `json:"source"`
 	Kind      string            `json:"kind"`
+	Mode      string            `json:"mode"`
 	Unit      string            `json:"unit"`
 	Timestamp string            `json:"timestamp"`
 	Payload   map[string]string `json:"payload,omitempty"`
@@ -113,6 +177,7 @@ type EventEnvelope struct {
 type WatchFilter struct {
 	Source string
 	Kind   string
+	Mode   string
 	Unit   string
 }
 
@@ -123,13 +188,16 @@ func (f WatchFilter) Matches(event EventEnvelope) bool {
 	if f.Kind != "" && f.Kind != event.Kind {
 		return false
 	}
+	if f.Mode != "" && !strings.EqualFold(strings.TrimSpace(f.Mode), strings.TrimSpace(event.Mode)) {
+		return false
+	}
 	if f.Unit == "" {
 		return true
 	}
 	return strings.TrimSuffix(f.Unit, ".service") == strings.TrimSuffix(event.Unit, ".service")
 }
 
-func NewEvent(source string, kind string, unit string, payload map[string]string) EventEnvelope {
+func NewEvent(mode string, source string, kind string, unit string, payload map[string]string) EventEnvelope {
 	cleanUnit := strings.TrimSuffix(strings.TrimSpace(unit), ".service")
 	if cleanUnit != "" {
 		cleanUnit += ".service"
@@ -137,6 +205,7 @@ func NewEvent(source string, kind string, unit string, payload map[string]string
 	return EventEnvelope{
 		Source:    source,
 		Kind:      kind,
+		Mode:      PlaneForMode(mode).Mode,
 		Unit:      cleanUnit,
 		Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
 		Payload:   payload,

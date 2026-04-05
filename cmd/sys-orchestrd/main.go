@@ -153,7 +153,7 @@ func (d *daemon) watchEvents(ctx context.Context, events chan<- visionapi.EventE
 }
 
 func (d *daemon) watchEventsOnce(ctx context.Context, events chan<- visionapi.EventEnvelope) error {
-	path := "/v1/watch?unit=" + url.QueryEscape(d.unit)
+	path := "/v1/watch?mode=" + url.QueryEscape(visionapi.ModeForUser(d.userMode)) + "&unit=" + url.QueryEscape(d.unit)
 	resp, err := d.sysvisionRequest(ctx, path)
 	if err != nil {
 		return err
@@ -213,7 +213,7 @@ func (d *daemon) writeState(state string, reason string) {
 
 func (d *daemon) publishState(state string, reason string) {
 	payload := map[string]string{"state": state, "reason": reason}
-	envelope := visionapi.NewEvent(visionapi.SourceSysOrchestrd, visionapi.KindUnitOrchestration, d.unit, payload)
+	envelope := visionapi.NewEvent(visionapi.ModeForUser(d.userMode), visionapi.SourceSysOrchestrd, visionapi.KindUnitOrchestration, d.unit, payload)
 	data, err := json.Marshal(envelope)
 	if err != nil {
 		return

@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,65 +24,83 @@ type subscriber struct {
 	ch     chan visionapi.EventEnvelope
 }
 
+type planeState struct {
+	mode                string
+	servicectlConnected bool
+	servicectlErrorText string
+}
+
 type daemon struct {
-	userMode                  bool
-	runtime                   string
-	logger                    *log.Logger
-	mu                        sync.Mutex
-	nextID                    int
-	subs                      map[int]subscriber
-	servicectlEventsConnected bool
-	servicectlEventsError     string
+	logger *log.Logger
+	mu     sync.Mutex
+	nextID int
+	subs   map[int]subscriber
+	plane  map[string]planeState
 }
 
 type metaResponse struct {
-	ServicectlEventsConnected bool   `json:"servicectl_events_connected"`
-	ServicectlEventsError     string `json:"servicectl_events_error,omitempty"`
+	SystemServicectlEventsConnected bool   `json:"system_servicectl_events_connected"`
+	SystemServicectlEventsError     string `json:"system_servicectl_events_error,omitempty"`
+	UserServicectlEventsConnected   bool   `json:"user_servicectl_events_connected"`
+	UserServicectlEventsError       string `json:"user_servicectl_events_error,omitempty"`
 }
 
 func main() {
-	userMode := flag.Bool("user", false, "run in user mode")
 	flag.Parse()
 	logger := log.New(os.Stdout, "sysvisiond: ", log.LstdFlags)
-	d := &daemon{userMode: *userMode, runtime: visionapi.RuntimeDir(*userMode, os.Getenv("XDG_RUNTIME_DIR")), logger: logger, subs: make(map[int]subscriber)}
+	d := &daemon{logger: logger, subs: make(map[int]subscriber), plane: map[string]planeState{
+		visionapi.ModeSystem: {mode: visionapi.ModeSystem},
+		visionapi.ModeUser:   {mode: visionapi.ModeUser},
+	}}
 	if err := d.run(); err != nil {
 		logger.Fatal(err)
 	}
 }
 
 func (d *daemon) run() error {
-	if err := os.MkdirAll(visionapi.SysvisionDir(d.userMode, d.runtime), 0755); err != nil {
-		return fmt.Errorf("create sysvision runtime directory: %w", err)
+	for _, plane := range visionapi.Planes() {
+		if err := os.MkdirAll(visionapi.SysvisionDirForMode(plane.Mode), 0755); err != nil {
+			return fmt.Errorf("create %s sysvision runtime directory: %w", plane.Mode, err)
+		}
 	}
-	go d.bridgeServicectlEvents()
-	go d.listenNotifydIngress()
-	return d.serveAPI()
+	errCh := make(chan error, 6)
+	for _, plane := range visionapi.Planes() {
+		plane := plane
+		go d.bridgeServicectlEvents(plane.Mode)
+		go func() { errCh <- d.listenNotifydIngress(plane.Mode) }()
+		go func() { errCh <- d.serveAPI(plane.Mode) }()
+	}
+	err := <-errCh
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
-func (d *daemon) bridgeServicectlEvents() {
+func (d *daemon) bridgeServicectlEvents(mode string) {
 	for {
-		if err := d.streamServicectlEvents(); err != nil {
-			d.logger.Printf("servicectl event stream failed: %v", err)
+		if err := d.streamServicectlEvents(mode); err != nil {
+			d.logger.Printf("%s servicectl event stream failed: %v", mode, err)
 			time.Sleep(time.Second)
 		}
 	}
 }
 
-func (d *daemon) streamServicectlEvents() error {
+func (d *daemon) streamServicectlEvents(mode string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	resp, err := d.servicectlRequest(ctx, "/v1/events")
+	resp, err := d.servicectlRequest(ctx, mode, "/v1/events?mode="+url.QueryEscape(mode))
 	if err != nil {
-		d.setServicectlEventsState(false, err.Error())
+		d.setServicectlEventsState(mode, false, err.Error())
 		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		err := fmt.Errorf("servicectl events returned %s", resp.Status)
-		d.setServicectlEventsState(false, err.Error())
+		d.setServicectlEventsState(mode, false, err.Error())
 		return err
 	}
-	d.setServicectlEventsState(true, "")
+	d.setServicectlEventsState(mode, true, "")
 	scanner := bufio.NewScanner(resp.Body)
 	buf := make([]byte, 0, 64*1024)
 	scanner.Buffer(buf, 1024*1024)
@@ -91,27 +110,30 @@ func (d *daemon) streamServicectlEvents() error {
 		if err := json.Unmarshal(line, &event); err != nil {
 			continue
 		}
+		if strings.TrimSpace(event.Mode) == "" {
+			event.Mode = mode
+		}
 		d.broadcast(event)
 	}
 	if err := scanner.Err(); err != nil && err != io.EOF {
-		d.setServicectlEventsState(false, err.Error())
+		d.setServicectlEventsState(mode, false, err.Error())
 		return err
 	}
-	d.setServicectlEventsState(false, io.EOF.Error())
+	d.setServicectlEventsState(mode, false, io.EOF.Error())
 	return io.EOF
 }
 
-func (d *daemon) listenNotifydIngress() {
+func (d *daemon) listenNotifydIngress(mode string) error {
 	for {
-		if err := d.listenNotifydIngressOnce(); err != nil {
-			d.logger.Printf("notifyd ingress failed: %v", err)
+		if err := d.listenNotifydIngressOnce(mode); err != nil {
+			d.logger.Printf("%s notifyd ingress failed: %v", mode, err)
 			time.Sleep(time.Second)
 		}
 	}
 }
 
-func (d *daemon) listenNotifydIngressOnce() error {
-	socketPath := visionapi.SysvisionIngressSocketPath(d.userMode, d.runtime)
+func (d *daemon) listenNotifydIngressOnce(mode string) error {
+	socketPath := visionapi.SysvisionIngressSocketPathForMode(mode)
 	if err := visionapi.PrepareUnixDatagramListener(socketPath); err != nil {
 		return err
 	}
@@ -134,31 +156,34 @@ func (d *daemon) listenNotifydIngressOnce() error {
 		if err := json.Unmarshal(buf[:n], &event); err != nil {
 			continue
 		}
+		if strings.TrimSpace(event.Mode) == "" {
+			event.Mode = mode
+		}
 		d.broadcast(event)
 	}
 }
 
-func (d *daemon) serveAPI() error {
-	socketPath := visionapi.SysvisionSocketPath(d.userMode, d.runtime)
+func (d *daemon) serveAPI(mode string) error {
+	socketPath := visionapi.SysvisionSocketPathForMode(mode)
 	if err := visionapi.PrepareUnixStreamListener(socketPath); err != nil {
-		return fmt.Errorf("prepare sysvision api socket: %w", err)
+		return fmt.Errorf("prepare %s sysvision api socket: %w", mode, err)
 	}
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
-		return fmt.Errorf("listen on sysvision api socket: %w", err)
+		return fmt.Errorf("listen on %s sysvision api socket: %w", mode, err)
 	}
 	defer func() {
 		_ = listener.Close()
 		_ = os.Remove(socketPath)
 	}()
 	if err := os.Chmod(socketPath, 0660); err != nil {
-		return fmt.Errorf("chmod sysvision api socket: %w", err)
+		return fmt.Errorf("chmod %s sysvision api socket: %w", mode, err)
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/meta", d.handleMeta)
-	mux.HandleFunc("/v1/watch", d.handleWatch)
-	mux.HandleFunc("/v1/query/units", d.handleUnitsQuery)
-	mux.HandleFunc("/v1/query/unit/", d.handleUnitQuery)
+	mux.HandleFunc("/v1/watch", func(w http.ResponseWriter, r *http.Request) { d.handleWatch(mode, w, r) })
+	mux.HandleFunc("/v1/query/units", func(w http.ResponseWriter, r *http.Request) { d.handleUnitsQuery(mode, w, r) })
+	mux.HandleFunc("/v1/query/unit/", func(w http.ResponseWriter, r *http.Request) { d.handleUnitQuery(mode, w, r) })
 	server := &http.Server{Handler: mux}
 	return server.Serve(listener)
 }
@@ -171,7 +196,7 @@ func (d *daemon) handleMeta(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, d.meta())
 }
 
-func (d *daemon) handleWatch(w http.ResponseWriter, r *http.Request) {
+func (d *daemon) handleWatch(mode string, w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
@@ -184,6 +209,7 @@ func (d *daemon) handleWatch(w http.ResponseWriter, r *http.Request) {
 	filter := visionapi.WatchFilter{
 		Source: r.URL.Query().Get("source"),
 		Kind:   r.URL.Query().Get("kind"),
+		Mode:   firstNonEmpty(strings.TrimSpace(r.URL.Query().Get("mode")), mode),
 		Unit:   r.URL.Query().Get("unit"),
 	}
 	id, ch := d.subscribe(filter)
@@ -208,12 +234,12 @@ func (d *daemon) handleWatch(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (d *daemon) handleUnitsQuery(w http.ResponseWriter, r *http.Request) {
+func (d *daemon) handleUnitsQuery(mode string, w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	resp, err := d.servicectlRequest(r.Context(), "/v1/units")
+	resp, err := d.servicectlRequest(r.Context(), mode, "/v1/units")
 	if err != nil {
 		w.WriteHeader(http.StatusBadGateway)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
@@ -223,7 +249,7 @@ func (d *daemon) handleUnitsQuery(w http.ResponseWriter, r *http.Request) {
 	copyResponse(w, resp)
 }
 
-func (d *daemon) handleUnitQuery(w http.ResponseWriter, r *http.Request) {
+func (d *daemon) handleUnitQuery(mode string, w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
@@ -233,7 +259,7 @@ func (d *daemon) handleUnitQuery(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	resp, err := d.servicectlRequest(r.Context(), "/v1/unit/"+url.PathEscape(name))
+	resp, err := d.servicectlRequest(r.Context(), mode, "/v1/unit/"+url.PathEscape(name))
 	if err != nil {
 		w.WriteHeader(http.StatusBadGateway)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
@@ -271,32 +297,38 @@ func (d *daemon) broadcast(event visionapi.EventEnvelope) {
 		select {
 		case sub.ch <- event:
 		default:
-			d.logger.Printf("dropping slow subscriber %d for %s %s", id, event.Source, event.Unit)
+			d.logger.Printf("dropping slow subscriber %d for %s %s %s", id, event.Mode, event.Source, event.Unit)
 		}
 	}
 }
 
-func (d *daemon) setServicectlEventsState(connected bool, errText string) {
+func (d *daemon) setServicectlEventsState(mode string, connected bool, errText string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.servicectlEventsConnected = connected
-	d.servicectlEventsError = errText
+	state := d.plane[visionapi.PlaneForMode(mode).Mode]
+	state.servicectlConnected = connected
+	state.servicectlErrorText = errText
+	d.plane[state.mode] = state
 }
 
 func (d *daemon) meta() metaResponse {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	system := d.plane[visionapi.ModeSystem]
+	user := d.plane[visionapi.ModeUser]
 	return metaResponse{
-		ServicectlEventsConnected: d.servicectlEventsConnected,
-		ServicectlEventsError:     d.servicectlEventsError,
+		SystemServicectlEventsConnected: system.servicectlConnected,
+		SystemServicectlEventsError:     system.servicectlErrorText,
+		UserServicectlEventsConnected:   user.servicectlConnected,
+		UserServicectlEventsError:       user.servicectlErrorText,
 	}
 }
 
-func (d *daemon) servicectlRequest(ctx context.Context, path string) (*http.Response, error) {
+func (d *daemon) servicectlRequest(ctx context.Context, mode string, path string) (*http.Response, error) {
 	transport := &http.Transport{
 		DialContext: func(ctx context.Context, network string, addr string) (net.Conn, error) {
 			var dialer net.Dialer
-			return dialer.DialContext(ctx, "unix", visionapi.ServicectlSocketPath(d.userMode, d.runtime))
+			return dialer.DialContext(ctx, "unix", visionapi.ServicectlSocketPathForMode(mode))
 		},
 	}
 	client := &http.Client{Transport: transport}
@@ -322,4 +354,13 @@ func writeJSON(w http.ResponseWriter, value any) {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	_ = enc.Encode(value)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
