@@ -522,11 +522,16 @@ func (s *server) startChild() error {
 	go func() {
 		err := cmd.Wait()
 		s.mu.Lock()
-		if s.cmd == cmd {
+		tracked := s.cmd == cmd
+		if tracked {
 			s.cmdErr = err
+			s.resetForIdleLocked()
 			close(cmdDone)
 		}
 		s.mu.Unlock()
+		if tracked {
+			s.writeState()
+		}
 		s.cmdExit <- childExitEvent{err: err}
 	}()
 	return nil
@@ -834,9 +839,6 @@ func (s *server) startChildIfNeeded(reason string) error {
 }
 
 func (s *server) handleChildExit(err error) error {
-	s.mu.Lock()
-	s.resetForIdleLocked()
-	s.mu.Unlock()
 	if s.isLazySocketService() {
 		if err != nil {
 			s.logger.Printf("backend exited: %v", err)

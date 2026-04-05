@@ -841,11 +841,6 @@ func recursiveStart(unitName string, visited map[string]bool) bool {
 		}
 	}
 
-	serviceName := cleanName
-	if shouldManageWithNotifyd(unit, socketUnit) {
-		serviceName = managedServiceName(cleanName)
-	}
-
 	if shouldManageWithNotifyd(unit, socketUnit) {
 		if !isUnitStarted(cleanName) {
 			if err := cleanupStaleSocketArtifacts(cleanName, socketUnit); err != nil {
@@ -858,12 +853,6 @@ func recursiveStart(unitName string, visited map[string]bool) bool {
 		}
 	} else if !isUnitStarted(cleanName) {
 		if !runDinitctl("start", cleanName) {
-			return false
-		}
-	}
-	loggerName := loggerServiceName(serviceName)
-	if !isUnitStarted(loggerName) {
-		if !runDinitctl("start", loggerName) {
 			return false
 		}
 	}
