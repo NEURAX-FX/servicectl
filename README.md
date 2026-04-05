@@ -50,10 +50,16 @@ bash ./scripts/install.sh
 
 ## Test
 
-Run the full regression suite:
+Run the default safe regression suite:
 
 ```bash
 bash ./scripts/test-all.sh
+```
+
+The default suite runs build checks, `go test`, and the safe `sys-notifyd` integration path. Host-mutating integration suites are opt-in:
+
+```bash
+SERVICECTL_RUN_HOST_INTEGRATION=1 bash ./scripts/test-all.sh
 ```
 
 Useful focused tests:
@@ -76,6 +82,6 @@ System mode:
 User mode:
 
 - `/run/user/<uid>/servicectl`
-- `/run/user/<uid>/s6/rc`
+- shared `/s6/rc` graph with user-mode daemons started via `--user`
 
-The user backend path is based on `/run/user/<uid>` semantics, not `XDG_RUNTIME_DIR` semantics.
+The user runtime path is based on `/run/user/<uid>` semantics, not `XDG_RUNTIME_DIR` semantics. The s6 source graph is shared; system/user differences live in the daemon arguments and runtime socket paths rather than separate s6 source trees.
