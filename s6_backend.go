@@ -6,7 +6,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 )
 
@@ -87,35 +86,19 @@ func s6LiveEnabled() bool {
 	return value == "1" || strings.EqualFold(value, "true")
 }
 
-func userBackendRoot() string {
-	return filepath.Join("/run/user", strconv.Itoa(os.Getuid()))
-}
-
 func s6SourceRoot() string {
-	if userMode() {
-		return filepath.Join(userBackendRoot(), "s6", "rc")
-	}
 	return "/s6/rc"
 }
 
 func s6BundleName() string {
-	if userMode() {
-		return "servicectl-user-enabled"
-	}
 	return "servicectl-enabled"
 }
 
 func s6SysvisiondServiceName() string {
-	if userMode() {
-		return "sysvisiond-user"
-	}
 	return "sysvisiond"
 }
 
 func s6ServicectlAPIServiceName() string {
-	if userMode() {
-		return "servicectl-user-api"
-	}
 	return "servicectl-api"
 }
 
@@ -128,24 +111,15 @@ func s6ServicectlAPISourceDir() string {
 }
 
 func s6CompiledValidateDir() string {
-	if userMode() {
-		return filepath.Join(userBackendRoot(), "s6", "compiled.servicectl-user")
-	}
 	return "/run/s6/compiled.servicectl"
 }
 
 func s6LiveDir() string {
-	if userMode() {
-		return filepath.Join(userBackendRoot(), "s6", "state")
-	}
 	return "/run/s6/state"
 }
 
 func s6OrchestrdServiceName(unitName string) string {
 	clean := strings.TrimSuffix(resolveUnitAlias(unitName), ".service")
-	if userMode() {
-		return clean + "-user-orchestrd"
-	}
 	return clean + "-orchestrd"
 }
 
@@ -170,9 +144,6 @@ func s6Available() bool {
 		if _, err := os.Stat(path); err != nil {
 			return false
 		}
-	}
-	if userMode() {
-		return strings.TrimSpace(userBackendRoot()) != ""
 	}
 	info, err := os.Stat(s6SourceRoot())
 	return err == nil && info.IsDir()

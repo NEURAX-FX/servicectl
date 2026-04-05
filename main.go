@@ -38,7 +38,7 @@ Core commands:
   is-failed     Exit 0 if unit is failed
 
 S6 orchestration commands:
-  enable        Generate and register <unit>-orchestrd / <unit>-user-orchestrd
+  enable        Generate and register <unit>-orchestrd in the shared s6 graph
   disable       Remove orchestrd registration and stop the unit best-effort
   is-enabled    Report whether the unit has an s6 orchestrd registration
 
@@ -49,7 +49,7 @@ Low-level / internal:
 
 Modes:
   default       System mode; runtime paths live under /run/servicectl and /s6/rc
-  --user        User mode; backend paths live under /run/user/<uid>/servicectl and /run/user/<uid>/s6/rc
+  --user        User mode; runtime sockets live under /run/user/<uid>/servicectl
 
 Local API sockets:
   servicectl    /run/servicectl/servicectl.sock

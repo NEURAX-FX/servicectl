@@ -12,14 +12,12 @@ SYSTEM_BUNDLE_DIR="/s6/rc/servicectl-enabled"
 SYSTEM_DEFAULT_CONTENTS="/s6/rc/default/contents"
 USER_UNIT_NAME="s6-user-orchestrd-demo"
 USER_RUNTIME="/tmp/runtime-0"
-USER_BACKEND_ROOT="/run/user/$(id -u)"
-USER_ROOT="$USER_BACKEND_ROOT/s6/rc"
 USER_UNIT_PATH="$HOME/.config/systemd/user/${USER_UNIT_NAME}.service"
-USER_SERVICE_DIR="$USER_ROOT/${USER_UNIT_NAME}-user-orchestrd"
-USER_SYSVISION_DIR="$USER_ROOT/sysvisiond-user"
-USER_API_DIR="$USER_ROOT/servicectl-user-api"
-USER_BUNDLE_DIR="$USER_ROOT/servicectl-user-enabled"
-USER_DEFAULT_CONTENTS="$USER_ROOT/default/contents"
+USER_SERVICE_DIR="/s6/rc/${USER_UNIT_NAME}-orchestrd"
+USER_SYSVISION_DIR="/s6/rc/sysvisiond"
+USER_API_DIR="/s6/rc/servicectl-api"
+USER_BUNDLE_DIR="/s6/rc/servicectl-enabled"
+USER_DEFAULT_CONTENTS="/s6/rc/default/contents"
 BACKUP_DIR="$(mktemp -d /tmp/servicectl-s6-backup.XXXXXX)"
 
 cleanup() {
@@ -40,25 +38,6 @@ cleanup() {
   fi
   if [[ -d "$BACKUP_DIR/system.api" ]]; then
     cp -a "$BACKUP_DIR/system.api" "$SYSTEM_API_DIR"
-  fi
-  if [[ -f "$BACKUP_DIR/user.default.contents" ]]; then
-    mkdir -p "$(dirname "$USER_DEFAULT_CONTENTS")"
-    cp "$BACKUP_DIR/user.default.contents" "$USER_DEFAULT_CONTENTS"
-  fi
-  rm -rf "$USER_BUNDLE_DIR" "$USER_SERVICE_DIR"
-  rm -rf "$USER_SYSVISION_DIR"
-  rm -rf "$USER_API_DIR"
-  if [[ -d "$BACKUP_DIR/user.bundle" ]]; then
-    cp -a "$BACKUP_DIR/user.bundle" "$USER_BUNDLE_DIR"
-  fi
-  if [[ -d "$BACKUP_DIR/user.service" ]]; then
-    cp -a "$BACKUP_DIR/user.service" "$USER_SERVICE_DIR"
-  fi
-  if [[ -d "$BACKUP_DIR/user.sysvisiond" ]]; then
-    cp -a "$BACKUP_DIR/user.sysvisiond" "$USER_SYSVISION_DIR"
-  fi
-  if [[ -d "$BACKUP_DIR/user.api" ]]; then
-    cp -a "$BACKUP_DIR/user.api" "$USER_API_DIR"
   fi
   rm -f "$SYSTEM_UNIT_PATH" "$USER_UNIT_PATH"
   rm -rf "$BACKUP_DIR"
@@ -92,22 +71,7 @@ if [[ -d "$SYSTEM_API_DIR" ]]; then
   cp -a "$SYSTEM_API_DIR" "$BACKUP_DIR/system.api"
 fi
 
-mkdir -p "$USER_ROOT" "$(dirname "$USER_UNIT_PATH")" "$USER_BACKEND_ROOT"
-if [[ -f "$USER_DEFAULT_CONTENTS" ]]; then
-  cp "$USER_DEFAULT_CONTENTS" "$BACKUP_DIR/user.default.contents"
-fi
-if [[ -d "$USER_BUNDLE_DIR" ]]; then
-  cp -a "$USER_BUNDLE_DIR" "$BACKUP_DIR/user.bundle"
-fi
-if [[ -d "$USER_SERVICE_DIR" ]]; then
-  cp -a "$USER_SERVICE_DIR" "$BACKUP_DIR/user.service"
-fi
-if [[ -d "$USER_SYSVISION_DIR" ]]; then
-  cp -a "$USER_SYSVISION_DIR" "$BACKUP_DIR/user.sysvisiond"
-fi
-if [[ -d "$USER_API_DIR" ]]; then
-  cp -a "$USER_API_DIR" "$BACKUP_DIR/user.api"
-fi
+mkdir -p "$(dirname "$USER_UNIT_PATH")"
 
 cat >"$SYSTEM_UNIT_PATH" <<'EOF'
 [Unit]
@@ -164,10 +128,10 @@ printf 'Enabling user unit through s6 backend...\n'
 XDG_RUNTIME_DIR="$USER_RUNTIME" "$ROOT/servicectl" --user enable "$USER_UNIT_NAME" >/tmp/s6-user-enable.out
 assert_contains /tmp/s6-user-enable.out "Enabled ${USER_UNIT_NAME}"
 assert_contains "$USER_BUNDLE_DIR/type" "bundle"
-assert_contains "$USER_BUNDLE_DIR/contents" "${USER_UNIT_NAME}-user-orchestrd"
-assert_contains "$USER_DEFAULT_CONTENTS" "servicectl-user-enabled"
-assert_contains "$USER_DEFAULT_CONTENTS" "sysvisiond-user"
-assert_contains "$USER_DEFAULT_CONTENTS" "servicectl-user-api"
+assert_contains "$USER_BUNDLE_DIR/contents" "${USER_UNIT_NAME}-orchestrd"
+assert_contains "$USER_DEFAULT_CONTENTS" "servicectl-enabled"
+assert_contains "$USER_DEFAULT_CONTENTS" "sysvisiond"
+assert_contains "$USER_DEFAULT_CONTENTS" "servicectl-api"
 assert_contains "$USER_SERVICE_DIR/type" "longrun"
 assert_contains "$USER_SERVICE_DIR/run" "sys-orchestrd --user --unit ${USER_UNIT_NAME}.service"
 assert_contains "$USER_SYSVISION_DIR/run" "sysvisiond --user"
