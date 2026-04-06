@@ -17,13 +17,30 @@ func includeDependencyName(dep string) bool {
 	return true
 }
 
-func startDependencies(u *Unit) []string {
+func hardStartDependencies(u *Unit) []string {
 	deps := make([]string, 0, len(u.Requires)+len(u.BindsTo)+len(u.PartOf))
 	seen := make(map[string]bool)
 	all := make([]string, 0, len(u.Requires)+len(u.BindsTo)+len(u.PartOf))
 	all = append(all, u.Requires...)
 	all = append(all, u.BindsTo...)
 	all = append(all, u.PartOf...)
+	for _, dep := range all {
+		clean := strings.TrimSpace(dep)
+		if !includeDependencyName(clean) || seen[clean] {
+			continue
+		}
+		seen[clean] = true
+		deps = append(deps, clean)
+	}
+	return deps
+}
+
+func softStartDependencies(u *Unit) []string {
+	deps := make([]string, 0, len(u.Wants)+len(u.After))
+	seen := make(map[string]bool)
+	all := make([]string, 0, len(u.Wants)+len(u.After))
+	all = append(all, u.Wants...)
+	all = append(all, u.After...)
 	for _, dep := range all {
 		clean := strings.TrimSpace(dep)
 		if !includeDependencyName(clean) || seen[clean] {

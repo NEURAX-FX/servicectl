@@ -296,7 +296,7 @@ func (u *Unit) GenerateDinit() string {
 		sb.WriteString(fmt.Sprintf("working-dir = %s\n", u.WorkingDirectory))
 	}
 	seen := make(map[string]bool)
-	for _, d := range startDependencies(u) {
+	for _, d := range hardStartDependencies(u) {
 		resolved, ok := resolvedDependencyServiceName(d)
 		if ok && resolved != u.Name && !seen[resolved] {
 			sb.WriteString(fmt.Sprintf("depends-on = %s\n", resolved))
@@ -326,7 +326,7 @@ func (u *Unit) GenerateNotifydDinit(socketUnit *SocketUnit) string {
 		sb.WriteString(fmt.Sprintf("working-dir = %s\n", u.WorkingDirectory))
 	}
 	seen := make(map[string]bool)
-	for _, d := range startDependencies(u) {
+	for _, d := range hardStartDependencies(u) {
 		resolved, ok := resolvedDependencyServiceName(d)
 		if ok && resolved != managedName && !seen[resolved] {
 			sb.WriteString(fmt.Sprintf("depends-on = %s\n", resolved))
@@ -425,7 +425,7 @@ func recursiveInstall(unitName string, visited map[string]bool, opts installOpti
 		serviceName = managedServiceName(cleanName)
 	}
 	knownToDinit := isDinitServiceKnown(serviceName)
-	for _, d := range startDependencies(unit) {
+	for _, d := range hardStartDependencies(unit) {
 		if _, ok := resolvedDependencyServiceName(d); ok {
 			recursiveInstall(strings.TrimSuffix(resolveUnitAlias(d), ".service"), visited, opts)
 		}

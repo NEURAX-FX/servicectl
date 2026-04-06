@@ -872,7 +872,7 @@ func recursiveStart(unitName string, visited map[string]bool) bool {
 	}
 	socketUnit, _ := parseOptionalSocketUnit(cleanName)
 
-	for _, d := range startDependencies(unit) {
+	for _, d := range hardStartDependencies(unit) {
 		if _, ok := resolvedDependencyServiceName(d); ok {
 			if shouldSkipFailedDependency(d) {
 				fmt.Printf("Skipping failed auxiliary dependency: %s\n", strings.TrimSuffix(resolveUnitAlias(d), ".service"))
@@ -880,6 +880,18 @@ func recursiveStart(unitName string, visited map[string]bool) bool {
 			}
 			if !recursiveStart(strings.TrimSuffix(resolveUnitAlias(d), ".service"), visited) {
 				return false
+			}
+		}
+	}
+
+	for _, d := range softStartDependencies(unit) {
+		if _, ok := resolvedDependencyServiceName(d); ok {
+			if shouldSkipFailedDependency(d) {
+				fmt.Printf("Skipping failed soft dependency: %s\n", strings.TrimSuffix(resolveUnitAlias(d), ".service"))
+				continue
+			}
+			if !recursiveStart(strings.TrimSuffix(resolveUnitAlias(d), ".service"), visited) {
+				fmt.Printf("warning: soft dependency %s failed; continuing with %s\n", strings.TrimSuffix(resolveUnitAlias(d), ".service"), cleanName)
 			}
 		}
 	}
