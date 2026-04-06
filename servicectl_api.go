@@ -109,7 +109,7 @@ func buildUnitSnapshot(cfg Config, unitName string) (visionapi.UnitSnapshot, err
 		return visionapi.UnitSnapshot{}, err
 	}
 	socketUnit, _ := parseOptionalSocketUnit(unitName)
-	dinitName := dinitNameForUnit(unitName)
+	dinitName := backendServiceNameForUnit(unitName)
 	loggerName := loggerServiceName(dinitName)
 	status := dinitStatus(dinitName)
 	runtimeState := map[string]string(nil)

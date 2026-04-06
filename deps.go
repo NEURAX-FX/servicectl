@@ -18,12 +18,10 @@ func includeDependencyName(dep string) bool {
 }
 
 func startDependencies(u *Unit) []string {
-	deps := make([]string, 0, len(u.Requires)+len(u.Wants)+len(u.After)+len(u.BindsTo)+len(u.PartOf))
+	deps := make([]string, 0, len(u.Requires)+len(u.BindsTo)+len(u.PartOf))
 	seen := make(map[string]bool)
-	all := make([]string, 0, len(u.Requires)+len(u.Wants)+len(u.After)+len(u.BindsTo)+len(u.PartOf))
+	all := make([]string, 0, len(u.Requires)+len(u.BindsTo)+len(u.PartOf))
 	all = append(all, u.Requires...)
-	all = append(all, u.Wants...)
-	all = append(all, u.After...)
 	all = append(all, u.BindsTo...)
 	all = append(all, u.PartOf...)
 	for _, dep := range all {
@@ -84,12 +82,10 @@ func listServiceUnitNames() []string {
 }
 
 func reverseRestartDependencies(u *Unit) []string {
-	deps := make([]string, 0, len(u.Requires)+len(u.Wants)+len(u.After)+len(u.BindsTo)+len(u.PartOf))
+	deps := make([]string, 0, len(u.Requires)+len(u.BindsTo)+len(u.PartOf))
 	seen := make(map[string]bool)
-	all := make([]string, 0, len(u.Requires)+len(u.Wants)+len(u.After)+len(u.BindsTo)+len(u.PartOf))
+	all := make([]string, 0, len(u.Requires)+len(u.BindsTo)+len(u.PartOf))
 	all = append(all, u.Requires...)
-	all = append(all, u.Wants...)
-	all = append(all, u.After...)
 	all = append(all, u.BindsTo...)
 	all = append(all, u.PartOf...)
 	for _, dep := range all {

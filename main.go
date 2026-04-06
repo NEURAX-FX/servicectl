@@ -122,6 +122,8 @@ func parseKeyValueFile(path string) map[string]string {
 
 func formatActiveLine(state string) string {
 	switch {
+	case strings.EqualFold(strings.TrimSpace(state), "NOT LOADED"):
+		return "inactive (backend not loaded)"
 	case state == "STARTED":
 		return "active (running)"
 	case strings.HasPrefix(state, "STOPPED (terminated; exited - status "):
@@ -233,7 +235,11 @@ func printStatus(unitName string) {
 
 	state := status["State"]
 	if state == "" {
-		state = "unknown"
+		if statusErr != nil {
+			state = "NOT LOADED"
+		} else {
+			state = "unknown"
+		}
 	}
 	if runtimeState != nil {
 		runtimeMainPID = runtimeState["main_pid"]
@@ -305,7 +311,11 @@ func printStatusFromSnapshot(unitName string, snapshot visionapi.UnitSnapshot) {
 	mainPID := strings.TrimSpace(snapshot.MainPID)
 	state := strings.TrimSpace(snapshot.State)
 	if state == "" {
-		state = "unknown"
+		if dinitStatus(snapshot.DinitName) == nil {
+			state = "NOT LOADED"
+		} else {
+			state = "unknown"
+		}
 	}
 	runtimePhase := strings.TrimSpace(snapshot.Phase)
 	runtimeChildState := strings.TrimSpace(snapshot.ChildState)
@@ -379,7 +389,7 @@ func currentMainPIDForUnit(unitName string) string {
 			}
 		}
 	}
-	dinitName := dinitNameForUnit(unitName)
+	dinitName := backendServiceNameForUnit(unitName)
 	status := dinitStatus(dinitName)
 	if status == nil {
 		return ""
@@ -391,8 +401,37 @@ func currentMainPIDForUnit(unitName string) string {
 	return pid
 }
 
+func backendServiceNameForUnit(unitName string) string {
+	cleanName := strings.TrimSuffix(strings.TrimSpace(resolveUnitAlias(unitName)), ".service")
+	unit, err := parseSystemdUnit(cleanName)
+	if err != nil {
+		return dinitNameForUnit(cleanName)
+	}
+	socketUnit, _ := parseOptionalSocketUnit(cleanName)
+	if shouldManageWithNotifyd(unit, socketUnit) {
+		return managedServiceName(cleanName)
+	}
+	return dinitNameForUnit(cleanName)
+}
+
+func shouldSkipFailedDependency(unitName string) bool {
+	unit, err := parseSystemdUnit(unitName)
+	if err != nil {
+		return false
+	}
+	if !strings.EqualFold(unit.Type, "oneshot") || !unit.RemainAfterExit {
+		return false
+	}
+	status := dinitStatus(backendServiceNameForUnit(unitName))
+	if status == nil {
+		return false
+	}
+	state := strings.TrimSpace(status["State"])
+	return strings.HasPrefix(state, "STOPPED")
+}
+
 func stopUnit(unitName string) int {
-	if !runDinitctl("stop", dinitNameForUnit(unitName)) {
+	if !runDinitctl("stop", backendServiceNameForUnit(unitName)) {
 		return 1
 	}
 	return 0
@@ -412,7 +451,7 @@ func addTrackedPID(tracked map[int]bool, raw string) {
 
 func trackedUnitPIDs(unitName string) map[int]bool {
 	tracked := map[int]bool{os.Getpid(): true}
-	if status := dinitStatus(dinitNameForUnit(unitName)); status != nil {
+	if status := dinitStatus(backendServiceNameForUnit(unitName)); status != nil {
 		addTrackedPID(tracked, status["Process ID"])
 	}
 	if runtimeState := parseKeyValueFile(notifydStatePath(unitName)); runtimeState != nil {
@@ -600,7 +639,7 @@ func reloadUnit(unitName string) int {
 	mainPID := currentMainPIDForUnit(unitName)
 	needsMainPID := strings.Contains(unit.ExecReload, "$MAINPID") || strings.Contains(unit.ExecReload, "${MAINPID}")
 	if mainPID == "" && shouldManageWithNotifyd(unit, socketUnit) && strings.Contains(unit.ExecReload, "kill") {
-		dinitName := dinitNameForUnit(unitName)
+		dinitName := backendServiceNameForUnit(unitName)
 		status := dinitStatus(dinitName)
 		if status != nil {
 			fmt.Printf("ExecReload for %s.service requires runtime PID context, but no runtime main process is available. Reloading dinit service description only.\n", unitName)
@@ -610,7 +649,7 @@ func reloadUnit(unitName string) int {
 		return 1
 	}
 	if needsMainPID && mainPID == "" {
-		dinitName := dinitNameForUnit(unitName)
+		dinitName := backendServiceNameForUnit(unitName)
 		status := dinitStatus(dinitName)
 		if status != nil {
 			fmt.Printf("ExecReload for %s.service requires MAINPID, but no runtime main process is available. Reloading dinit service description only.\n", unitName)
@@ -643,7 +682,7 @@ func reloadUnit(unitName string) int {
 		}
 		return 0
 	}
-	dinitName := dinitNameForUnit(unitName)
+	dinitName := backendServiceNameForUnit(unitName)
 	status := dinitStatus(dinitName)
 	if status != nil {
 		fmt.Printf("No ExecReload for %s.service; reloading dinit service description only. Use restart for runtime changes.\n", unitName)
@@ -654,7 +693,7 @@ func reloadUnit(unitName string) int {
 }
 
 func isUnitStarted(unitName string) bool {
-	cmd := dinitctlCommand("is-started", dinitNameForUnit(unitName))
+	cmd := dinitctlCommand("is-started", backendServiceNameForUnit(unitName))
 	cmd.Stdout = nil
 	cmd.Stderr = nil
 	return cmd.Run() == nil
@@ -669,12 +708,12 @@ func restartUnit(unitName string) int {
 	if len(dependents) > 0 {
 		fmt.Printf("Stopping dependents: %s\n", strings.Join(dependents, ", "))
 		for _, dependent := range dependents {
-			if code := runDinitctlWithStatus("stop", dinitNameForUnit(dependent)); code != 0 {
+			if code := runDinitctlWithStatus("stop", backendServiceNameForUnit(dependent)); code != 0 {
 				return code
 			}
 		}
 	}
-	if code := runDinitctlWithStatus("stop", dinitNameForUnit(unitName)); code != 0 {
+	if code := runDinitctlWithStatus("stop", backendServiceNameForUnit(unitName)); code != 0 {
 		return code
 	}
 	fmt.Printf("Restarting target: %s\n", unitName)
@@ -744,7 +783,7 @@ func showUnit(unitName string) int {
 		return 1
 	}
 	socketUnit, _ := parseOptionalSocketUnit(unitName)
-	dinitName := dinitNameForUnit(unitName)
+	dinitName := backendServiceNameForUnit(unitName)
 	loggerName := loggerServiceName(dinitName)
 	status := dinitStatus(dinitName)
 	runtimeState := map[string]string(nil)
@@ -835,6 +874,10 @@ func recursiveStart(unitName string, visited map[string]bool) bool {
 
 	for _, d := range startDependencies(unit) {
 		if _, ok := resolvedDependencyServiceName(d); ok {
+			if shouldSkipFailedDependency(d) {
+				fmt.Printf("Skipping failed auxiliary dependency: %s\n", strings.TrimSuffix(resolveUnitAlias(d), ".service"))
+				continue
+			}
 			if !recursiveStart(strings.TrimSuffix(resolveUnitAlias(d), ".service"), visited) {
 				return false
 			}
@@ -926,7 +969,7 @@ func isActive(unitName string) int {
 }
 
 func isFailed(unitName string) int {
-	out, code, err := dinitctlOutput("is-failed", dinitNameForUnit(unitName))
+	out, code, err := dinitctlOutput("is-failed", backendServiceNameForUnit(unitName))
 	if err == nil {
 		fmt.Println(statusColor("failed"))
 		return 0
@@ -944,7 +987,7 @@ func killUnit(unitName string, signalName string) int {
 	if signalName == "" {
 		signalName = "TERM"
 	}
-	if code := runDinitctlWithStatus("signal", signalName, dinitNameForUnit(unitName)); code != 0 {
+	if code := runDinitctlWithStatus("signal", signalName, backendServiceNameForUnit(unitName)); code != 0 {
 		return code
 	}
 	fmt.Printf("%s %s (%s)\n", colorize("Sent signal", styleCyan), unitName, signalName)
@@ -1305,7 +1348,7 @@ parsedFlags:
 			fmt.Printf("%s %s\n", colorize("Started", styleGreen), cleanName)
 			publishServicectlCommandEvent(action, cleanName, "ok")
 		case "stop":
-			if !runDinitctl("stop", dinitNameForUnit(cleanName)) {
+			if !runDinitctl("stop", backendServiceNameForUnit(cleanName)) {
 				publishServicectlCommandEvent(action, cleanName, "error")
 				exitCode = 1
 				continue

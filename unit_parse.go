@@ -15,6 +15,7 @@ type Unit struct {
 	SourcePath       string
 	Description      string
 	Type             string
+	RemainAfterExit  bool
 	ExecStart        []string
 	ExecStop         string
 	ExecReload       string
@@ -46,6 +47,7 @@ type SocketUnit struct {
 	SourcePath    string
 	Description   string
 	Service       string
+	Accept        bool
 	ListenStreams []string
 	ListenDgrams  []string
 	FDNames       []string
@@ -176,6 +178,8 @@ func parseSystemdUnit(name string) (*Unit, error) {
 				switch k {
 				case "Type":
 					unit.Type = v
+				case "RemainAfterExit":
+					unit.RemainAfterExit = strings.EqualFold(v, "yes") || strings.EqualFold(v, "true") || v == "1"
 				case "ExecStart":
 					if v == "" {
 						unit.ExecStart = nil
@@ -312,6 +316,8 @@ func parseSocketUnit(name string) (*SocketUnit, error) {
 				}
 			case "Socket":
 				switch k {
+				case "Accept":
+					socketUnit.Accept = strings.EqualFold(v, "yes") || strings.EqualFold(v, "true") || v == "1"
 				case "ListenStream":
 					if v != "" {
 						socketUnit.ListenStreams = append(socketUnit.ListenStreams, expandSpecifiers(v, target))

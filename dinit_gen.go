@@ -54,6 +54,9 @@ func logdBinaryPath() string {
 }
 
 func shouldManageWithNotifyd(unit *Unit, socketUnit *SocketUnit) bool {
+	if socketUnit != nil && socketUnit.Accept {
+		return false
+	}
 	return socketUnit != nil || strings.EqualFold(unit.Type, "notify")
 }
 
