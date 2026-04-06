@@ -109,14 +109,15 @@ func buildUnitSnapshot(cfg Config, unitName string) (visionapi.UnitSnapshot, err
 		return visionapi.UnitSnapshot{}, err
 	}
 	socketUnit, _ := parseOptionalSocketUnit(unitName)
+	managementMode := managedServiceModeForUnit(unit, socketUnit)
 	dinitName := backendServiceNameForUnit(unitName)
 	loggerName := loggerServiceName(dinitName)
 	status := dinitStatus(dinitName)
 	runtimeState := map[string]string(nil)
 	managedBy := "dinit"
-	if shouldManageWithNotifyd(unit, socketUnit) {
+	if managementMode != managedDirect {
 		managedBy = "sys-notifyd"
-		runtimeState = parseKeyValueFile(notifydStatePath(unitName))
+		runtimeState = parseKeyValueFile(notifydStatePath(unitName, managementMode))
 	}
 	processID := statusValue(status, "Process ID")
 	managerPID := ""

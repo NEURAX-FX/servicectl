@@ -9,6 +9,14 @@ import (
 	"strings"
 )
 
+type managedServiceMode string
+
+const (
+	managedDirect  managedServiceMode = "direct"
+	managedNotifyd managedServiceMode = "notifyd"
+	managedSocketd managedServiceMode = "socketd"
+)
+
 func dinitArg(s string) string {
 	if s != "" && !strings.ContainsAny(s, " \t\n\r\"\\") {
 		return s
@@ -18,12 +26,33 @@ func dinitArg(s string) string {
 	return `"` + escaped + `"`
 }
 
-func managedServiceName(name string) string {
-	return strings.TrimSuffix(name, ".service") + "-socketd"
+func managedServiceModeForUnit(unit *Unit, socketUnit *SocketUnit) managedServiceMode {
+	if socketUnit != nil {
+		if socketUnit.Accept {
+			return managedDirect
+		}
+		return managedSocketd
+	}
+	if unit != nil && strings.EqualFold(unit.Type, "notify") {
+		return managedNotifyd
+	}
+	return managedDirect
 }
 
-func notifydStatePath(name string) string {
-	managedName := managedServiceName(name)
+func managedServiceName(name string, mode managedServiceMode) string {
+	cleanName := strings.TrimSuffix(name, ".service")
+	switch mode {
+	case managedNotifyd:
+		return cleanName + "-notifyd"
+	case managedSocketd:
+		return cleanName + "-socketd"
+	default:
+		return cleanName
+	}
+}
+
+func notifydStatePath(name string, mode managedServiceMode) string {
+	managedName := managedServiceName(name, mode)
 	return filepath.Join(config.DinitGenDir, managedName+".state")
 }
 
@@ -54,13 +83,7 @@ func logdBinaryPath() string {
 }
 
 func shouldManageWithNotifyd(unit *Unit, socketUnit *SocketUnit) bool {
-	if unit == nil || socketUnit == nil {
-		return false
-	}
-	if socketUnit.Accept {
-		return false
-	}
-	return true
+	return managedServiceModeForUnit(unit, socketUnit) != managedDirect
 }
 
 func dinitNameForUnit(unitName string) string {
@@ -70,10 +93,10 @@ func dinitNameForUnit(unitName string) string {
 		return cleanName
 	}
 	socketUnit, socketErr := parseOptionalSocketUnit(cleanName)
-	if socketErr == nil && shouldManageWithNotifyd(unit, socketUnit) {
-		return managedServiceName(cleanName)
+	if socketErr == nil {
+		return managedServiceName(cleanName, managedServiceModeForUnit(unit, socketUnit))
 	}
-	return cleanName
+	return managedServiceName(cleanName, managedServiceModeForUnit(unit, nil))
 }
 
 func resolvedDependencyServiceName(dep string) (string, bool) {
@@ -282,11 +305,10 @@ func (u *Unit) GenerateDinit() string {
 	}
 	allEnvs := mergedServiceEnv(u)
 	finalCmd := compileExecStart(u, allEnvs)
-	envPrefixMap := make(map[string]string, len(allEnvs)+1)
+	envPrefixMap := make(map[string]string, len(allEnvs))
 	for k, v := range allEnvs {
 		envPrefixMap[k] = v
 	}
-	envPrefixMap["NOTIFY_SOCKET"] = "/dev/null"
 	sb.WriteString(fmt.Sprintf("command = %s%s\n", buildEnvPrefix(envPrefixMap), finalCmd))
 	if u.ExecStop != "" {
 		stopCmd := compileExecStop(u, allEnvs)
@@ -311,11 +333,11 @@ func (u *Unit) GenerateDinit() string {
 	return sb.String()
 }
 
-func (u *Unit) GenerateNotifydDinit(socketUnit *SocketUnit) string {
+func (u *Unit) GenerateNotifydDinit(mode managedServiceMode, socketUnit *SocketUnit) string {
 	var sb strings.Builder
-	managedName := managedServiceName(u.Name)
+	managedName := managedServiceName(u.Name, mode)
 	sb.WriteString(fmt.Sprintf("# Generated from %s.service\n", u.Name))
-	if socketUnit != nil {
+	if mode == managedSocketd && socketUnit != nil {
 		sb.WriteString(fmt.Sprintf("# Socket activation via %s.socket\n", socketUnit.Name))
 	}
 	if u.Description != "" {
@@ -340,7 +362,7 @@ func (u *Unit) GenerateNotifydDinit(socketUnit *SocketUnit) string {
 	backendEnv := mergedServiceEnv(u)
 	backendCmd := compileExecStart(u, backendEnv)
 	backendCmd = buildEnvPrefix(backendEnv) + backendCmd
-	args := []string{notifydBinaryPath(), "-service", dinitArg(u.Name), "-service-type", dinitArg(strings.ToLower(u.Type)), "-command", dinitArg(backendCmd), "-state-file", dinitArg(notifydStatePath(u.Name))}
+	args := []string{notifydBinaryPath(), "-service", dinitArg(u.Name), "-service-type", dinitArg(strings.ToLower(u.Type)), "-command", dinitArg(backendCmd), "-state-file", dinitArg(notifydStatePath(u.Name, mode))}
 	if userMode() {
 		args = append(args, "-user")
 	}
@@ -360,8 +382,10 @@ func (u *Unit) GenerateNotifydDinit(socketUnit *SocketUnit) string {
 	if sig := normalizeSignalName(u.KillSignal); sig != "" {
 		args = append(args, "-kill-signal", dinitArg(sig))
 	}
-	args = append(args, socketListenArgs(socketUnit)...)
-	if socketUnit == nil {
+	if mode == managedSocketd {
+		args = append(args, socketListenArgs(socketUnit)...)
+	}
+	if mode != managedSocketd {
 		args = append(args, "-start-now")
 	}
 	sb.WriteString(fmt.Sprintf("command = %s\n", strings.Join(args, " ")))
@@ -423,10 +447,8 @@ func recursiveInstall(unitName string, visited map[string]bool, opts installOpti
 		fmt.Printf("Error parsing socket for %s: %v\n", cleanName, socketErr)
 		return
 	}
-	serviceName := cleanName
-	if shouldManageWithNotifyd(unit, socketUnit) {
-		serviceName = managedServiceName(cleanName)
-	}
+	mode := managedServiceModeForUnit(unit, socketUnit)
+	serviceName := managedServiceName(cleanName, mode)
 	knownToDinit := isDinitServiceKnown(serviceName)
 	for _, d := range hardStartDependencies(unit) {
 		if _, ok := resolvedDependencyServiceName(d); ok {
@@ -446,8 +468,8 @@ func recursiveInstall(unitName string, visited map[string]bool, opts installOpti
 	}
 	ensureServiceDirectories(unit)
 	var content []byte
-	if shouldManageWithNotifyd(unit, socketUnit) {
-		content = []byte(unit.GenerateNotifydDinit(socketUnit))
+	if mode != managedDirect {
+		content = []byte(unit.GenerateNotifydDinit(mode, socketUnit))
 	} else {
 		content = []byte(unit.GenerateDinit())
 	}

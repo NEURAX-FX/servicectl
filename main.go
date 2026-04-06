@@ -201,11 +201,15 @@ func printStatus(unitName string) {
 	}
 	unit, err := parseSystemdUnit(unitName)
 	socketUnit, _ := parseOptionalSocketUnit(unitName)
+	mode := managedDirect
 	dinitName := unitName
 	runtimeState := map[string]string(nil)
-	if err == nil && shouldManageWithNotifyd(unit, socketUnit) {
-		dinitName = managedServiceName(unitName)
-		runtimeState = parseKeyValueFile(notifydStatePath(unitName))
+	if err == nil {
+		mode = managedServiceModeForUnit(unit, socketUnit)
+		dinitName = managedServiceName(unitName, mode)
+		if mode != managedDirect {
+			runtimeState = parseKeyValueFile(notifydStatePath(unitName, mode))
+		}
 	}
 	out, statusErr := dinitctlCommand("status", dinitName).CombinedOutput()
 	if err != nil && statusErr != nil {
@@ -381,11 +385,14 @@ func printStatusFromSnapshot(unitName string, snapshot visionapi.UnitSnapshot) {
 func currentMainPIDForUnit(unitName string) string {
 	unit, err := parseSystemdUnit(unitName)
 	socketUnit, _ := parseOptionalSocketUnit(unitName)
-	if err == nil && shouldManageWithNotifyd(unit, socketUnit) {
-		runtimeState := parseKeyValueFile(notifydStatePath(unitName))
-		if runtimeState != nil {
-			if mainPID := strings.TrimSpace(runtimeState["main_pid"]); mainPID != "" && mainPID != "0" {
-				return mainPID
+	if err == nil {
+		mode := managedServiceModeForUnit(unit, socketUnit)
+		if mode != managedDirect {
+			runtimeState := parseKeyValueFile(notifydStatePath(unitName, mode))
+			if runtimeState != nil {
+				if mainPID := strings.TrimSpace(runtimeState["main_pid"]); mainPID != "" && mainPID != "0" {
+					return mainPID
+				}
 			}
 		}
 	}
@@ -408,10 +415,7 @@ func backendServiceNameForUnit(unitName string) string {
 		return dinitNameForUnit(cleanName)
 	}
 	socketUnit, _ := parseOptionalSocketUnit(cleanName)
-	if shouldManageWithNotifyd(unit, socketUnit) {
-		return managedServiceName(cleanName)
-	}
-	return dinitNameForUnit(cleanName)
+	return managedServiceName(cleanName, managedServiceModeForUnit(unit, socketUnit))
 }
 
 func shouldSkipFailedDependency(unitName string) bool {
@@ -454,8 +458,14 @@ func trackedUnitPIDs(unitName string) map[int]bool {
 	if status := dinitStatus(backendServiceNameForUnit(unitName)); status != nil {
 		addTrackedPID(tracked, status["Process ID"])
 	}
-	if runtimeState := parseKeyValueFile(notifydStatePath(unitName)); runtimeState != nil {
-		addTrackedPID(tracked, runtimeState["main_pid"])
+	if unit, err := parseSystemdUnit(unitName); err == nil {
+		socketUnit, _ := parseOptionalSocketUnit(unitName)
+		mode := managedServiceModeForUnit(unit, socketUnit)
+		if mode != managedDirect {
+			if runtimeState := parseKeyValueFile(notifydStatePath(unitName, mode)); runtimeState != nil {
+				addTrackedPID(tracked, runtimeState["main_pid"])
+			}
+		}
 	}
 	addTrackedPID(tracked, currentMainPIDForUnit(unitName))
 	return tracked
@@ -638,7 +648,7 @@ func reloadUnit(unitName string) int {
 	allEnvs := mergedServiceEnv(unit)
 	mainPID := currentMainPIDForUnit(unitName)
 	needsMainPID := strings.Contains(unit.ExecReload, "$MAINPID") || strings.Contains(unit.ExecReload, "${MAINPID}")
-	if mainPID == "" && shouldManageWithNotifyd(unit, socketUnit) && strings.Contains(unit.ExecReload, "kill") {
+	if mainPID == "" && managedServiceModeForUnit(unit, socketUnit) != managedDirect && strings.Contains(unit.ExecReload, "kill") {
 		dinitName := backendServiceNameForUnit(unitName)
 		status := dinitStatus(dinitName)
 		if status != nil {
@@ -796,9 +806,10 @@ func showUnit(unitName string) int {
 	status := dinitStatus(dinitName)
 	runtimeState := map[string]string(nil)
 	managedBy := "dinit"
-	if shouldManageWithNotifyd(unit, socketUnit) {
+	managementMode := managedServiceModeForUnit(unit, socketUnit)
+	if managementMode != managedDirect {
 		managedBy = "sys-notifyd"
-		runtimeState = parseKeyValueFile(notifydStatePath(unitName))
+		runtimeState = parseKeyValueFile(notifydStatePath(unitName, managementMode))
 	}
 	allEnvs := mergedServiceEnv(unit)
 	backendCmd := compileExecStart(unit, allEnvs)
@@ -806,7 +817,7 @@ func showUnit(unitName string) int {
 	stopCmd := compileExecStop(unit, allEnvs)
 
 	fmt.Printf("%s %s\n\n", colorize("servicectl show", styleBold, styleCyan), colorize(unitName+".service", styleBold))
-	printSection("Unit", [][2]string{{"Name", unitName + ".service"}, {"Mode", config.Mode}, {"Description", unit.Description}, {"Source", unit.SourcePath}, {"Managed By", managedBy}, {"Dinit", dinitName}, {"Logger", loggerName}, {"Log Tag", journalIdentifier(unitName)}})
+	printSection("Unit", [][2]string{{"Name", unitName + ".service"}, {"Mode", config.Mode}, {"Description", unit.Description}, {"Source", unit.SourcePath}, {"Managed By", managedBy}, {"Activation Model", string(managementMode)}, {"Dinit", dinitName}, {"Logger", loggerName}, {"Log Tag", journalIdentifier(unitName)}})
 	mainPID := ""
 	managerRuntimePID := ""
 	if runtimeState != nil {
@@ -817,7 +828,7 @@ func showUnit(unitName string) int {
 		mainPID = status["Process ID"]
 	}
 	printSection("Runtime", [][2]string{{"State", statusValue(status, "State")}, {"Activation", statusValue(status, "Activation")}, {"Process ID", statusValue(status, "Process ID")}, {"Manager PID", managerRuntimePID}, {"Main PID", mainPID}, {"Phase", mapValue(runtimeState, "phase")}, {"Child", mapValue(runtimeState, "child_state")}, {"Status", mapValue(runtimeState, "status")}, {"Failure", mapValue(runtimeState, "failure")}, {"Notify Sock", notifySocketPath(unitName, unit, socketUnit)}, {"State File", managedStateFilePath(unitName, unit, socketUnit)}})
-	printSection("Exec", [][2]string{{"Type", unit.Type}, {"ExecStart", backendCmd}, {"ExecReload", reloadCmd}, {"ExecStop", stopCmd}, {"WorkingDir", unit.WorkingDirectory}, {"User", unit.User}, {"Group", unit.Group}})
+	printSection("Exec", [][2]string{{"Service Type", unit.Type}, {"ExecStart", backendCmd}, {"ExecReload", reloadCmd}, {"ExecStop", stopCmd}, {"WorkingDir", unit.WorkingDirectory}, {"User", unit.User}, {"Group", unit.Group}})
 	printSection("Sockets", [][2]string{{"Socket Unit", socketSource(socketUnit)}, {"Listen", socketListenValue(socketUnit)}, {"FD Names", formatList(socketFDNames(socketUnit))}})
 	printEnvironmentSection(unit)
 	printSection("Dependencies", [][2]string{{"Requires", formatList(unit.Requires)}, {"Wants", formatList(unit.Wants)}, {"After", formatList(unit.After)}, {"BindsTo", formatList(unit.BindsTo)}, {"PartOf", formatList(unit.PartOf)}})
@@ -854,12 +865,13 @@ func showUnitFromSnapshot(unitName string, snapshot visionapi.UnitSnapshot) int 
 	}
 
 	fmt.Printf("%s %s\n\n", colorize("servicectl show", styleBold, styleCyan), colorize(unitName+".service", styleBold))
-	printSection("Unit", [][2]string{{"Name", unitName + ".service"}, {"Mode", config.Mode}, {"Description", unit.Description}, {"Source", unit.SourcePath}, {"Managed By", snapshot.ManagedBy}, {"Dinit", snapshot.DinitName}, {"Logger", snapshot.LoggerName}, {"Log Tag", journalIdentifier(unitName)}})
+	managementMode := managedServiceModeForUnit(unit, socketUnit)
+	printSection("Unit", [][2]string{{"Name", unitName + ".service"}, {"Mode", config.Mode}, {"Description", unit.Description}, {"Source", unit.SourcePath}, {"Managed By", snapshot.ManagedBy}, {"Activation Model", string(managementMode)}, {"Dinit", snapshot.DinitName}, {"Logger", snapshot.LoggerName}, {"Log Tag", journalIdentifier(unitName)}})
 	printSection("Runtime", [][2]string{{"State", emptyDash(snapshot.State)}, {"Activation", emptyDash(snapshot.Activation)}, {"Process ID", emptyDash(snapshot.ProcessID)}, {"Manager PID", emptyDash(snapshot.ManagerPID)}, {"Main PID", emptyDash(snapshot.MainPID)}, {"Phase", emptyDash(snapshot.Phase)}, {"Child", emptyDash(snapshot.ChildState)}, {"Status", emptyDash(snapshot.Status)}, {"Failure", emptyDash(snapshot.Failure)}, {"Notify Sock", emptyDash(snapshot.NotifySocket)}, {"State File", emptyDash(snapshot.StateFile)}})
 	printSection("Orchestration", [][2]string{{"Enabled", enabledState}, {"Orchestrator", orchName}, {"Orchestrator Scope", config.Mode}, {"Orchestrator State", emptyDash(mapValue(orchState, "state"))}, {"Orchestrator PID", emptyDash(orchPID)}, {"Orchestrator State File", orchestratorStateFilePath(unitName)}, {"Last Orchestration Event", emptyDash(mapValue(orchState, "state"))}, {"Last Orchestration Reason", emptyDash(mapValue(orchState, "reason"))}})
 	printSection("S6", [][2]string{{"S6 Service", orchName}, {"S6 Bundle", s6BundleName()}, {"S6 Source Root", s6SourceRoot()}, {"S6 Source Dir", s6OrchestrdSourceDir(unitName)}, {"In Default Bundle", boolWord(s6ContentsContain(s6DefaultContentsPath(), s6BundleName()) && s6ContentsContain(s6DefaultContentsPath(), s6SysvisiondServiceName()) && s6ContentsContain(s6DefaultContentsPath(), s6ServicectlAPIServiceName()))}, {"In Enable Bundle", boolWord(s6ContentsContain(s6BundleContentsPath(), orchName))}})
 	printSection("Control Plane", [][2]string{{"Servicectl API Socket", visionapi.ServicectlSocketPath(userMode(), runtimeDir())}, {"Servicectl Events Socket", visionapi.ServicectlEventsSocketPath(userMode(), runtimeDir())}, {"Sysvisiond Socket", visionapi.SysvisionSocketPath(userMode(), runtimeDir())}, {"Sysvisiond Ingress", visionapi.SysvisionIngressSocketPath(userMode(), runtimeDir())}, {"Bus Connected", busConnected}, {"Bus Error", emptyDash(busMeta.errorText)}})
-	printSection("Exec", [][2]string{{"Type", unit.Type}, {"ExecStart", backendCmd}, {"ExecReload", reloadCmd}, {"ExecStop", stopCmd}, {"WorkingDir", unit.WorkingDirectory}, {"User", unit.User}, {"Group", unit.Group}})
+	printSection("Exec", [][2]string{{"Service Type", unit.Type}, {"ExecStart", backendCmd}, {"ExecReload", reloadCmd}, {"ExecStop", stopCmd}, {"WorkingDir", unit.WorkingDirectory}, {"User", unit.User}, {"Group", unit.Group}})
 	printSection("Sockets", [][2]string{{"Socket Unit", socketSource(socketUnit)}, {"Listen", socketListenValue(socketUnit)}, {"FD Names", formatList(socketFDNames(socketUnit))}})
 	printEnvironmentSection(unit)
 	printSection("Dependencies", [][2]string{{"Requires", formatList(unit.Requires)}, {"Wants", formatList(unit.Wants)}, {"After", formatList(unit.After)}, {"BindsTo", formatList(unit.BindsTo)}, {"PartOf", formatList(unit.PartOf)}})
@@ -907,13 +919,16 @@ func recursiveStart(unitName string, visited map[string]bool) bool {
 		}
 	}
 
-	if shouldManageWithNotifyd(unit, socketUnit) {
+	mode := managedServiceModeForUnit(unit, socketUnit)
+	if mode != managedDirect {
 		if !isUnitStarted(cleanName) {
-			if err := cleanupStaleSocketArtifacts(cleanName, socketUnit); err != nil {
-				fmt.Println(err)
-				return false
+			if mode == managedSocketd {
+				if err := cleanupStaleSocketArtifacts(cleanName, socketUnit); err != nil {
+					fmt.Println(err)
+					return false
+				}
 			}
-			if !runDinitctl("start", managedServiceName(cleanName)) {
+			if !runDinitctl("start", managedServiceName(cleanName, mode)) {
 				return false
 			}
 		}

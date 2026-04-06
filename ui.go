@@ -220,17 +220,25 @@ func socketListenValue(socketUnit *SocketUnit) string {
 }
 
 func notifySocketPath(unitName string, unit *Unit, socketUnit *SocketUnit) string {
-	if unit == nil || !shouldManageWithNotifyd(unit, socketUnit) {
+	if unit == nil {
 		return ""
 	}
-	return filepath.Join(config.DinitGenDir, managedServiceName(unitName)+".notify.sock")
+	mode := managedServiceModeForUnit(unit, socketUnit)
+	if mode == managedDirect {
+		return ""
+	}
+	return filepath.Join(config.DinitGenDir, managedServiceName(unitName, mode)+".notify.sock")
 }
 
 func managedStateFilePath(unitName string, unit *Unit, socketUnit *SocketUnit) string {
-	if unit == nil || !shouldManageWithNotifyd(unit, socketUnit) {
+	if unit == nil {
 		return ""
 	}
-	return notifydStatePath(unitName)
+	mode := managedServiceModeForUnit(unit, socketUnit)
+	if mode == managedDirect {
+		return ""
+	}
+	return notifydStatePath(unitName, mode)
 }
 
 func printEnvironmentSection(unit *Unit) {
