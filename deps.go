@@ -35,7 +35,7 @@ func hardStartDependencies(u *Unit) []string {
 	return deps
 }
 
-func softStartDependencies(u *Unit) []string {
+func degradableStartDependencies(u *Unit) []string {
 	deps := make([]string, 0, len(u.Wants)+len(u.After))
 	seen := make(map[string]bool)
 	all := make([]string, 0, len(u.Wants)+len(u.After))

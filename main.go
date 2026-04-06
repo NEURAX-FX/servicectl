@@ -699,6 +699,14 @@ func isUnitStarted(unitName string) bool {
 	return cmd.Run() == nil
 }
 
+func stopBackendIfKnown(unitName string) int {
+	backendName := backendServiceNameForUnit(unitName)
+	if !isDinitServiceKnown(backendName) {
+		return 0
+	}
+	return runDinitctlWithStatus("stop", backendName)
+}
+
 func restartUnit(unitName string) int {
 	if _, err := parseSystemdUnit(unitName); err != nil {
 		fmt.Println(err)
@@ -708,12 +716,12 @@ func restartUnit(unitName string) int {
 	if len(dependents) > 0 {
 		fmt.Printf("Stopping dependents: %s\n", strings.Join(dependents, ", "))
 		for _, dependent := range dependents {
-			if code := runDinitctlWithStatus("stop", backendServiceNameForUnit(dependent)); code != 0 {
+			if code := stopBackendIfKnown(dependent); code != 0 {
 				return code
 			}
 		}
 	}
-	if code := runDinitctlWithStatus("stop", backendServiceNameForUnit(unitName)); code != 0 {
+	if code := stopBackendIfKnown(unitName); code != 0 {
 		return code
 	}
 	fmt.Printf("Restarting target: %s\n", unitName)
@@ -874,6 +882,7 @@ func recursiveStart(unitName string, visited map[string]bool) bool {
 
 	for _, d := range hardStartDependencies(unit) {
 		if _, ok := resolvedDependencyServiceName(d); ok {
+			recursiveInstall(strings.TrimSuffix(resolveUnitAlias(d), ".service"), make(map[string]bool), installOptionsForUnit(strings.TrimSuffix(resolveUnitAlias(d), ".service"), false))
 			if shouldSkipFailedDependency(d) {
 				fmt.Printf("Skipping failed auxiliary dependency: %s\n", strings.TrimSuffix(resolveUnitAlias(d), ".service"))
 				continue
@@ -884,14 +893,16 @@ func recursiveStart(unitName string, visited map[string]bool) bool {
 		}
 	}
 
-	for _, d := range softStartDependencies(unit) {
+	for _, d := range degradableStartDependencies(unit) {
 		if _, ok := resolvedDependencyServiceName(d); ok {
+			depName := strings.TrimSuffix(resolveUnitAlias(d), ".service")
+			recursiveInstall(depName, make(map[string]bool), installOptionsForUnit(depName, false))
 			if shouldSkipFailedDependency(d) {
-				fmt.Printf("Skipping failed soft dependency: %s\n", strings.TrimSuffix(resolveUnitAlias(d), ".service"))
+				fmt.Printf("Skipping failed degradable dependency: %s\n", depName)
 				continue
 			}
-			if !recursiveStart(strings.TrimSuffix(resolveUnitAlias(d), ".service"), visited) {
-				fmt.Printf("warning: soft dependency %s failed; continuing with %s\n", strings.TrimSuffix(resolveUnitAlias(d), ".service"), cleanName)
+			if !recursiveStart(depName, visited) {
+				fmt.Printf("warning: degradable dependency %s failed during preflight; continuing with %s\n", depName, cleanName)
 			}
 		}
 	}
