@@ -32,6 +32,7 @@ type daemon struct {
 	logger     *log.Logger
 	groups     map[string]bool
 	groupUnits []string
+	debug      *startupDebugger
 }
 
 func main() {
@@ -49,7 +50,7 @@ func main() {
 	if strings.TrimSpace(*group) != "" {
 		stateName = "group:" + strings.TrimSpace(*group)
 	}
-	d := &daemon{unit: strings.TrimSpace(*unit), group: strings.TrimSpace(*group), userMode: *userMode, runtime: runtime, logger: logger, state: "waiting", stateFile: orchestrdStateFile(stateName, *userMode, runtime), groups: map[string]bool{}}
+	d := &daemon{unit: strings.TrimSpace(*unit), group: strings.TrimSpace(*group), userMode: *userMode, runtime: runtime, logger: logger, state: "waiting", stateFile: orchestrdStateFile(stateName, *userMode, runtime), groups: map[string]bool{}, debug: newStartupDebugger()}
 	if err := d.run(); err != nil {
 		logger.Printf("fatal: %v", err)
 		os.Exit(1)
@@ -265,6 +266,8 @@ func (d *daemon) runServicectl(action string) error {
 	if strings.TrimSpace(bin) == "" {
 		bin = "servicectl"
 	}
+	d.debug.logMungeProbe("before-servicectl-" + action)
+	d.debug.event("orchestrd.before-servicectl-start", map[string]any{"action": action, "unit": d.unit, "user_mode": d.userMode, "bin": bin})
 	args := []string{action, d.unit}
 	if d.userMode {
 		args = append([]string{"--user"}, args...)
@@ -272,7 +275,13 @@ func (d *daemon) runServicectl(action string) error {
 	cmd := exec.Command(bin, args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	err := cmd.Run()
+	fields := map[string]any{"action": action, "unit": d.unit, "user_mode": d.userMode, "ok": err == nil}
+	if err != nil {
+		fields["error"] = err.Error()
+	}
+	d.debug.event("orchestrd.after-servicectl-start", fields)
+	return err
 }
 
 func (d *daemon) runGroupAction(action string, units []string) error {

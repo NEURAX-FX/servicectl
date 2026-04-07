@@ -109,6 +109,7 @@ type server struct {
 	startReq    chan string
 	startErr    chan error
 	shutdownCh  chan struct{}
+	debug       *startupDebugger
 }
 
 type childExitEvent struct {
@@ -228,6 +229,7 @@ func newServer(cfg config, logger *log.Logger) (*server, error) {
 		startReq:    make(chan string, 8),
 		startErr:    make(chan error, 4),
 		shutdownCh:  make(chan struct{}),
+		debug:       newStartupDebugger(),
 	}
 
 	for _, spec := range cfg.listens {
@@ -508,6 +510,7 @@ func (s *server) startChild() error {
 		s.writeState()
 		return fmt.Errorf("start backend: %w", err)
 	}
+	s.debug.event("notifyd.exec-child", map[string]any{"service": s.cfg.serviceName, "service_type": s.cfg.serviceType, "pid": cmd.Process.Pid, "command": s.cfg.command, "user_mode": s.cfg.userMode})
 
 	s.mu.Lock()
 	s.cmd = cmd
@@ -789,6 +792,7 @@ func (s *server) markChildReady(seq uint64) {
 	if s.cmd != nil && s.mainPID > 0 {
 		s.logger.Printf("mainpid: %d", s.mainPID)
 	}
+	s.debug.event("notifyd.ready", map[string]any{"service": s.cfg.serviceName, "service_type": s.cfg.serviceType, "main_pid": s.mainPID, "status": s.status, "phase": s.phase, "user_mode": s.cfg.userMode})
 	s.writeStateLocked()
 }
 
@@ -842,16 +846,20 @@ func (s *server) handleChildExit(err error) error {
 	if s.isLazySocketService() {
 		if err != nil {
 			s.logger.Printf("backend exited: %v", err)
+			s.debug.event("notifyd.child-exit", map[string]any{"service": s.cfg.serviceName, "ok": false, "error": err.Error(), "lazy": true, "user_mode": s.cfg.userMode})
 		} else {
 			s.logger.Printf("backend exited, sockets remain armed")
+			s.debug.event("notifyd.child-exit", map[string]any{"service": s.cfg.serviceName, "ok": true, "lazy": true, "user_mode": s.cfg.userMode})
 		}
 		s.writeState()
 		return nil
 	}
 	if err != nil {
+		s.debug.event("notifyd.child-exit", map[string]any{"service": s.cfg.serviceName, "ok": false, "error": err.Error(), "lazy": false, "user_mode": s.cfg.userMode})
 		s.writeState()
 		return err
 	}
+	s.debug.event("notifyd.child-exit", map[string]any{"service": s.cfg.serviceName, "ok": true, "lazy": false, "user_mode": s.cfg.userMode})
 	s.writeState()
 	return fmt.Errorf("backend exited")
 }
