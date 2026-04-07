@@ -38,9 +38,9 @@ Core commands:
   is-failed     Exit 0 if unit is failed
 
 S6 orchestration commands:
-  enable        Generate and register <unit>-orchestrd in the shared s6 graph
-  disable       Remove orchestrd registration and stop the unit best-effort
-  is-enabled    Report whether the unit has an s6 orchestrd registration
+	  enable        Enable a service, group:<name>, or *.target
+	  disable       Disable a service, group:<name>, or *.target
+	  is-enabled    Report enabled state for a service, group:<name>, or *.target
 
 Low-level / internal:
   dinit         Raw passthrough to dinit/dinitctl
@@ -58,9 +58,66 @@ Local API sockets:
   user mode     same layout under /run/user/<uid>/servicectl/
 
 Notes:
-  enable/disable/is-enabled require the s6 backend to be available
-  serve-api and sysvisiond are intended for local tooling and orchestrators
-  use 'servicectl dinit ...' when you want raw dinit output`)
+	  enable/disable/is-enabled require the s6 backend only for real service units
+	  serve-api and sysvisiond are intended for local tooling and orchestrators
+	  use 'servicectl dinit ...' when you want raw dinit output`)
+}
+
+func handleVirtualTargetAction(action string, target virtualTarget) (bool, int) {
+	reference := targetReference(target)
+	if target.kind == "group" {
+		switch action {
+		case "enable":
+			if err := propertySet("persist.group."+target.name, "1", true); err != nil {
+				fmt.Println(oneLineError("enable group", err))
+				return true, 1
+			}
+			fmt.Printf("Enabled %s\n", reference)
+			return true, 0
+		case "disable":
+			if err := propertySet("persist.group."+target.name, "0", true); err != nil {
+				fmt.Println(oneLineError("disable group", err))
+				return true, 1
+			}
+			fmt.Printf("Disabled %s\n", reference)
+			return true, 0
+		case "is-enabled":
+			state, ok := queryGroupState(target.name)
+			if ok && state.Enabled {
+				fmt.Println("enabled")
+				return true, 0
+			}
+			fmt.Println("disabled")
+			return true, 1
+		case "status":
+			state, ok := queryGroupState(target.name)
+			if !ok {
+				fmt.Printf("Group %s not found\n", target.name)
+				return true, 1
+			}
+			status := "disabled"
+			if state.Enabled {
+				status = "enabled"
+			}
+			fmt.Printf("group:%s %s\n", target.name, status)
+			fmt.Printf("Units: %s\n", strings.Join(state.Units, ", "))
+			return true, 0
+		}
+	}
+	resolved, err := propertyResolveTarget(reference)
+	if err != nil {
+		fmt.Println(oneLineError("resolve target/group", err))
+		return true, 1
+	}
+	groupTarget, _ := parseVirtualTarget("group:" + resolved.Group)
+	return handleVirtualTargetAction(action, groupTarget)
+}
+
+func targetReference(target virtualTarget) string {
+	if target.kind == "group" {
+		return "group:" + target.name
+	}
+	return target.name
 }
 
 func parseDinitStatus(output string) map[string]string {
@@ -1360,13 +1417,31 @@ parsedFlags:
 	}
 	if action == "enable" || action == "disable" || action == "is-enabled" {
 		if !s6Available() {
-			fmt.Println("s6 backend is not available")
-			os.Exit(1)
+			requiresS6 := false
+			for _, t := range targets {
+				if _, ok := parseVirtualTarget(t); !ok {
+					requiresS6 = true
+					break
+				}
+			}
+			if requiresS6 {
+				fmt.Println("s6 backend is not available")
+				os.Exit(1)
+			}
 		}
 	}
 
 	exitCode := 0
 	for _, t := range targets {
+		if virtual, ok := parseVirtualTarget(t); ok {
+			handled, code := handleVirtualTargetAction(action, virtual)
+			if handled {
+				if code != 0 {
+					exitCode = code
+				}
+				continue
+			}
+		}
 		cleanName := strings.TrimSuffix(t, ".service")
 
 		switch action {

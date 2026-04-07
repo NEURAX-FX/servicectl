@@ -8,6 +8,7 @@
 - `dinit`: the real service supervisor for workload units
 - `sys-notifyd`: runtime state bridge for notify/socket-managed services
 - `sys-logd`: syslog endpoint using the standard `/dev/log` path
+- `sys-propertyd`: property/group state source for virtual targets and persisted enablement
 - `servicectl serve-api`: local unit snapshot and event API
 - `sysvisiond`: watch/query bus and event broker
 - `sys-orchestrd`: per-unit local orchestrator managed by s6
@@ -17,15 +18,51 @@
 
 Runtime control flow:
 
-`s6 -> servicectl-api -> sysvisiond -> sys-orchestrd -> servicectl -> dinit/sys-notifyd -> real service`
+`s6 -> servicectl-api/sys-propertyd -> sysvisiond -> sys-orchestrd -> servicectl -> dinit/sys-notifyd -> real service`
 
 Key rules:
 
 - `servicectl` remains the only CLI/control surface
 - `dinit` remains the final real service supervisor
+- `sys-propertyd` is the truth source for persisted group/property state
 - `sysvisiond` is bus-only: watch/query/broadcast, no persisted state and no decisions
 - `sys-orchestrd` is the per-unit local state machine and calls `servicectl`
 - `s6` supervises orchestrators and static startup dependencies
+
+## Virtual Targets
+
+`servicectl` can now accept virtual target inputs such as `group:audio` and `pipewire.target`.
+
+- External compatibility: `.target` names are accepted at the CLI boundary
+- Internal standard: targets are converted into `group`/`property` state managed by `sys-propertyd`
+- Persisted enablement uses Android-style keys such as `persist.group.audio=1`
+- Runtime overrides can use `prop.group.audio=1`
+
+This keeps `.target` as an input compatibility layer while the internal control plane only speaks properties and groups.
+
+Suggested config locations:
+
+- system groups: `/etc/servicectl/groups.d/*.conf`
+- system target aliases: `/etc/servicectl/targets.d/*.conf`
+- user groups: `~/.config/servicectl/groups.d/*.conf`
+- user target aliases: `~/.config/servicectl/targets.d/*.conf`
+
+Example group definition:
+
+```ini
+[Group]
+Name=audio
+Units=pipewire.service pipewire-pulse.service wireplumber.service
+Targets=pipewire.target
+```
+
+Example target alias:
+
+```ini
+[Target]
+Name=pipewire.target
+Group=audio
+```
 
 ## Repository Layout
 
@@ -65,6 +102,7 @@ SERVICECTL_RUN_HOST_INTEGRATION=1 bash ./scripts/test-all.sh
 Useful focused tests:
 
 ```bash
+bash ./scripts/test-property-targets.sh
 bash ./scripts/test-sysvisiond-bus.sh
 bash ./scripts/test-sys-orchestrd.sh
 bash ./scripts/test-s6-orchestrd.sh

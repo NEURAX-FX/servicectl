@@ -61,6 +61,26 @@ func sysvisiondBinaryPath() string {
 	return "sysvisiond"
 }
 
+func sysPropertydBinaryPath() string {
+	if candidate := siblingBinaryPath("sys-propertyd"); candidate != "" {
+		return candidate
+	}
+	if candidate, err := exec.LookPath("sys-propertyd"); err == nil {
+		return candidate
+	}
+	if home := strings.TrimSpace(os.Getenv("HOME")); home != "" {
+		candidate := filepath.Join(home, ".local", "bin", "sys-propertyd")
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+		candidate = filepath.Join(home, "servicectl", "sys-propertyd")
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+	}
+	return "sys-propertyd"
+}
+
 func sysOrchestrdBinaryPath() string {
 	if candidate := siblingBinaryPath("sys-orchestrd"); candidate != "" {
 		return candidate
@@ -102,12 +122,20 @@ func s6ServicectlAPIServiceName() string {
 	return "servicectl-api"
 }
 
+func s6SysPropertydServiceName() string {
+	return "sys-propertyd"
+}
+
 func s6SysvisiondSourceDir() string {
 	return filepath.Join(s6SourceRoot(), s6SysvisiondServiceName())
 }
 
 func s6ServicectlAPISourceDir() string {
 	return filepath.Join(s6SourceRoot(), s6ServicectlAPIServiceName())
+}
+
+func s6SysPropertydSourceDir() string {
+	return filepath.Join(s6SourceRoot(), s6SysPropertydServiceName())
 }
 
 func s6CompiledValidateDir() string {
@@ -193,6 +221,13 @@ func ensureS6Bundle() error {
 			return err
 		}
 	}
+	if !containsString(entries, s6SysPropertydServiceName()) {
+		entries = append(entries, s6SysPropertydServiceName())
+		sort.Strings(entries)
+		if err := os.WriteFile(s6DefaultContentsPath(), []byte(strings.Join(entries, "\n")+"\n"), 0644); err != nil {
+			return err
+		}
+	}
 	if !containsString(entries, s6ServicectlAPIServiceName()) {
 		entries = append(entries, s6ServicectlAPIServiceName())
 		sort.Strings(entries)
@@ -201,6 +236,9 @@ func ensureS6Bundle() error {
 		}
 	}
 	if err := ensureServicectlAPISource(); err != nil {
+		return err
+	}
+	if err := ensureSysPropertydSource(); err != nil {
 		return err
 	}
 	if err := ensureSysvisiondSource(); err != nil {
@@ -239,8 +277,27 @@ func ensureSysvisiondSource() error {
 	if err := os.WriteFile(filepath.Join(serviceDir, "run"), []byte(runScript), 0755); err != nil {
 		return err
 	}
-	depsContent := s6ServicectlAPIServiceName() + "\n"
+	depsContent := s6ServicectlAPIServiceName() + "\n" + s6SysPropertydServiceName() + "\n"
 	return os.WriteFile(filepath.Join(serviceDir, "dependencies"), []byte(depsContent), 0644)
+}
+
+func ensureSysPropertydSource() error {
+	serviceDir := s6SysPropertydSourceDir()
+	if err := os.MkdirAll(serviceDir, 0755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(serviceDir, "type"), []byte("longrun\n"), 0644); err != nil {
+		return err
+	}
+	runLine := sysPropertydBinaryPath()
+	if userMode() {
+		runLine += " --user"
+	}
+	runScript := strings.Join([]string{"#!/usr/bin/execlineb -P", runLine, ""}, "\n")
+	if err := os.WriteFile(filepath.Join(serviceDir, "run"), []byte(runScript), 0755); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(serviceDir, "dependencies"), nil, 0644)
 }
 
 func enableWithS6(unitName string) error {
@@ -296,6 +353,9 @@ func enableWithS6(unitName string) error {
 			return err
 		}
 		if err := liveStartS6(s6ServicectlAPIServiceName()); err != nil {
+			return err
+		}
+		if err := liveStartS6(s6SysPropertydServiceName()); err != nil {
 			return err
 		}
 		if err := liveStartS6(s6SysvisiondServiceName()); err != nil {

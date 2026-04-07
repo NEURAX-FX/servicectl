@@ -15,6 +15,7 @@ Installs:
   - servicectl
   - sys-notifyd
   - sys-logd
+  - sys-propertyd
   - sysvisiond
   - sys-orchestrd
 
@@ -87,6 +88,7 @@ build_and_install() {
 build_and_install servicectl "$ROOT"
 build_and_install sys-notifyd "$ROOT/cmd/sys-notifyd"
 build_and_install sys-logd "$ROOT/cmd/sys-logd"
+build_and_install sys-propertyd "$ROOT/cmd/sys-propertyd"
 build_and_install sysvisiond "$ROOT/cmd/sysvisiond"
 build_and_install sys-orchestrd "$ROOT/cmd/sys-orchestrd"
 
@@ -94,6 +96,7 @@ printf '\nInstalled binaries:\n'
 printf '  %s\n' "$BINDIR/servicectl"
 printf '  %s\n' "$BINDIR/sys-notifyd"
 printf '  %s\n' "$BINDIR/sys-logd"
+printf '  %s\n' "$BINDIR/sys-propertyd"
 printf '  %s\n' "$BINDIR/sysvisiond"
 printf '  %s\n' "$BINDIR/sys-orchestrd"
 

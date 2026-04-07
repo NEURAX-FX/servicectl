@@ -37,6 +37,7 @@ run_host_step "System restart dependency tree" bash "$ROOT/scripts/test-restart-
 run_host_step "Stale socket cleanup" bash "$ROOT/scripts/test-stale-socket-cleanup.sh"
 run_host_step "servicectl+dinit integration" bash "$ROOT/scripts/test-servicectl-dinit.sh"
 run_host_step "notify-managed integration" bash "$ROOT/scripts/test-notify-managed.sh"
+run_host_step "property target integration" bash "$ROOT/scripts/test-property-targets.sh"
 run_host_step "sysvisiond bus" bash "$ROOT/scripts/test-sysvisiond-bus.sh"
 run_host_step "sys-orchestrd integration" bash "$ROOT/scripts/test-sys-orchestrd.sh"
 run_host_step "s6 orchestrd backend" bash "$ROOT/scripts/test-s6-orchestrd.sh"

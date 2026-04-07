@@ -184,6 +184,11 @@ func (d *daemon) serveAPI(mode string) error {
 	mux.HandleFunc("/v1/watch", func(w http.ResponseWriter, r *http.Request) { d.handleWatch(mode, w, r) })
 	mux.HandleFunc("/v1/query/units", func(w http.ResponseWriter, r *http.Request) { d.handleUnitsQuery(mode, w, r) })
 	mux.HandleFunc("/v1/query/unit/", func(w http.ResponseWriter, r *http.Request) { d.handleUnitQuery(mode, w, r) })
+	mux.HandleFunc("/v1/query/properties", func(w http.ResponseWriter, r *http.Request) { d.handlePropertyQuery(mode, w, r, "/v1/properties") })
+	mux.HandleFunc("/v1/query/groups", func(w http.ResponseWriter, r *http.Request) { d.handlePropertyQuery(mode, w, r, "/v1/groups") })
+	mux.HandleFunc("/v1/query/group/", func(w http.ResponseWriter, r *http.Request) {
+		d.handlePropertyQuery(mode, w, r, "/v1/group/"+strings.TrimPrefix(r.URL.Path, "/v1/query/group/"))
+	})
 	server := &http.Server{Handler: mux}
 	return server.Serve(listener)
 }
@@ -211,6 +216,8 @@ func (d *daemon) handleWatch(mode string, w http.ResponseWriter, r *http.Request
 		Kind:   r.URL.Query().Get("kind"),
 		Mode:   firstNonEmpty(strings.TrimSpace(r.URL.Query().Get("mode")), mode),
 		Unit:   r.URL.Query().Get("unit"),
+		Group:  r.URL.Query().Get("group"),
+		Key:    r.URL.Query().Get("key"),
 	}
 	id, ch := d.subscribe(filter)
 	defer d.unsubscribe(id)
@@ -260,6 +267,21 @@ func (d *daemon) handleUnitQuery(mode string, w http.ResponseWriter, r *http.Req
 		return
 	}
 	resp, err := d.servicectlRequest(r.Context(), mode, "/v1/unit/"+url.PathEscape(name))
+	if err != nil {
+		w.WriteHeader(http.StatusBadGateway)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	defer resp.Body.Close()
+	copyResponse(w, resp)
+}
+
+func (d *daemon) handlePropertyQuery(mode string, w http.ResponseWriter, r *http.Request, path string) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	resp, err := d.propertyRequest(r.Context(), mode, path)
 	if err != nil {
 		w.WriteHeader(http.StatusBadGateway)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
@@ -329,6 +351,21 @@ func (d *daemon) servicectlRequest(ctx context.Context, mode string, path string
 		DialContext: func(ctx context.Context, network string, addr string) (net.Conn, error) {
 			var dialer net.Dialer
 			return dialer.DialContext(ctx, "unix", visionapi.ServicectlSocketPathForMode(mode))
+		},
+	}
+	client := &http.Client{Transport: transport}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://unix"+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	return client.Do(req)
+}
+
+func (d *daemon) propertyRequest(ctx context.Context, mode string, path string) (*http.Response, error) {
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, network string, addr string) (net.Conn, error) {
+			var dialer net.Dialer
+			return dialer.DialContext(ctx, "unix", visionapi.PropertySocketPathForMode(mode))
 		},
 	}
 	client := &http.Client{Transport: transport}
