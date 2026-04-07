@@ -351,8 +351,12 @@ func (d *daemon) saveStateLocked() error {
 }
 
 func (d *daemon) reloadDefinitions() error {
-	groups := map[string]groupDefinition{}
-	targets := map[string]string{}
+	autoGroups, autoTargets, err := importSystemdTargets(systemdUnitDirs(d.userMode))
+	if err != nil {
+		return err
+	}
+	explicitGroups := map[string]groupDefinition{}
+	explicitTargets := map[string]string{}
 	for _, dir := range d.groupDirs {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
@@ -367,9 +371,9 @@ func (d *daemon) reloadDefinitions() error {
 				return err
 			}
 			for _, def := range defs {
-				groups[def.Name] = def
+				explicitGroups[def.Name] = def
 				for _, target := range def.Targets {
-					targets[target] = def.Name
+					explicitTargets[target] = def.Name
 				}
 			}
 		}
@@ -388,9 +392,14 @@ func (d *daemon) reloadDefinitions() error {
 				return err
 			}
 			for target, group := range aliases {
-				targets[target] = group
+				explicitTargets[target] = group
 			}
 		}
+	}
+	groups := overrideGroups(autoGroups, explicitGroups)
+	targets := overrideTargets(autoTargets, explicitTargets)
+	if err := validateTargetGroups(groups, targets); err != nil {
+		return err
 	}
 	d.groups = groups
 	d.targets = targets

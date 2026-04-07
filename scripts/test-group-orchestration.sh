@@ -156,6 +156,14 @@ sleep 2
 printf 'Enabling group through target alias...\n'
 env SERVICECTL_SYSTEM_RUNTIME_ROOT="$SYSTEM_RUNTIME_ROOT" SERVICECTL_USER_RUNTIME_ROOT="$USER_RUNTIME_ROOT" "$ROOT/servicectl" enable test-chain.target >/tmp/group-orch-enable.out
 assert_file_contains /tmp/group-orch-enable.out 'Enabled group:test-chain'
+if [[ ! -d "/s6/rc/group-test-chain-orchestrd" ]]; then
+  printf 'assertion failed: missing s6 group orchestrator source\n' >&2
+  exit 1
+fi
+
+printf 'Checking direct group CLI path...\n'
+env SERVICECTL_SYSTEM_RUNTIME_ROOT="$SYSTEM_RUNTIME_ROOT" SERVICECTL_USER_RUNTIME_ROOT="$USER_RUNTIME_ROOT" "$ROOT/servicectl" --group test-chain is-enabled >/tmp/group-orch-group-enabled.out || true
+assert_file_contains /tmp/group-orch-group-enabled.out 'enabled'
 
 printf 'Checking dependency chain startup...\n'
 wait_for_active "$TOP_UNIT" "$TOP_UNIT"

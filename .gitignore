@@ -7,5 +7,6 @@
 /notify-echod
 /notify-sleeper
 /test-envd
+/sys-propertyd
 *.bak
 *.zip

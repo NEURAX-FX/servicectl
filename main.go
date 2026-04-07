@@ -63,63 +63,6 @@ Notes:
 	  use 'servicectl dinit ...' when you want raw dinit output`)
 }
 
-func handleVirtualTargetAction(action string, target virtualTarget) (bool, int) {
-	reference := targetReference(target)
-	if target.kind == "group" {
-		switch action {
-		case "enable":
-			if err := propertySet("persist.group."+target.name, "1", true); err != nil {
-				fmt.Println(oneLineError("enable group", err))
-				return true, 1
-			}
-			fmt.Printf("Enabled %s\n", reference)
-			return true, 0
-		case "disable":
-			if err := propertySet("persist.group."+target.name, "0", true); err != nil {
-				fmt.Println(oneLineError("disable group", err))
-				return true, 1
-			}
-			fmt.Printf("Disabled %s\n", reference)
-			return true, 0
-		case "is-enabled":
-			state, ok := queryGroupState(target.name)
-			if ok && state.Enabled {
-				fmt.Println("enabled")
-				return true, 0
-			}
-			fmt.Println("disabled")
-			return true, 1
-		case "status":
-			state, ok := queryGroupState(target.name)
-			if !ok {
-				fmt.Printf("Group %s not found\n", target.name)
-				return true, 1
-			}
-			status := "disabled"
-			if state.Enabled {
-				status = "enabled"
-			}
-			fmt.Printf("group:%s %s\n", target.name, status)
-			fmt.Printf("Units: %s\n", strings.Join(state.Units, ", "))
-			return true, 0
-		}
-	}
-	resolved, err := propertyResolveTarget(reference)
-	if err != nil {
-		fmt.Println(oneLineError("resolve target/group", err))
-		return true, 1
-	}
-	groupTarget, _ := parseVirtualTarget("group:" + resolved.Group)
-	return handleVirtualTargetAction(action, groupTarget)
-}
-
-func targetReference(target virtualTarget) string {
-	if target.kind == "group" {
-		return "group:" + target.name
-	}
-	return target.name
-}
-
 func parseDinitStatus(output string) map[string]string {
 	status := make(map[string]string)
 	for _, line := range strings.Split(output, "\n") {
@@ -1311,6 +1254,7 @@ func printSyslogFallback(unitName string, lines string) {
 
 func main() {
 	args := os.Args[1:]
+	groupFlag := ""
 	if len(args) == 1 {
 		switch args[0] {
 		case "help", "-h", "--help":
@@ -1324,6 +1268,13 @@ func main() {
 		case "--user":
 			userFlag = true
 			args = args[1:]
+		case "--group":
+			if len(args) < 2 {
+				fmt.Println("Usage: servicectl [--user] --group <name> <command>")
+				os.Exit(1)
+			}
+			groupFlag = strings.TrimSpace(args[1])
+			args = args[2:]
 		default:
 			goto parsedFlags
 		}
@@ -1343,7 +1294,7 @@ parsedFlags:
 			return
 		}
 	}
-	if len(args) == 1 && args[0] != "list" && args[0] != "serve-api" {
+	if groupFlag == "" && len(args) == 1 && args[0] != "list" && args[0] != "serve-api" {
 		printHelp()
 		return
 	}
@@ -1432,10 +1383,24 @@ parsedFlags:
 	}
 
 	exitCode := 0
+	if groupFlag != "" {
+		target, ok := parseGroupFlagValue(groupFlag)
+		if !ok {
+			fmt.Println("group name is required")
+			os.Exit(1)
+		}
+		if code, handled := handleGroupAction(action, target); handled {
+			os.Exit(code)
+		}
+	}
 	for _, t := range targets {
-		if virtual, ok := parseVirtualTarget(t); ok {
-			handled, code := handleVirtualTargetAction(action, virtual)
-			if handled {
+		if target, handled, err := maybeResolveGroupActionTarget(action, t); handled {
+			if err != nil {
+				fmt.Println(err)
+				exitCode = 1
+				continue
+			}
+			if code, done := handleGroupAction(action, target); done {
 				if code != 0 {
 					exitCode = code
 				}

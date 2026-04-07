@@ -152,4 +152,21 @@ if kill -0 "$ORCH_PID" >/dev/null 2>&1; then
 fi
 wait "$ORCH_PID" || true
 
+printf 'Checking sys-orchestrd --group mode...\n'
+: >"$CALL_LOG"
+start_bg env SERVICECTL_SYSTEM_RUNTIME_ROOT="$SYSTEM_RUNTIME_ROOT" SERVICECTL_USER_RUNTIME_ROOT="$USER_RUNTIME_ROOT" SERVICECTL_BIN="$FAKE_CTL" SYS_ORCHESTRD_STATE_FILE="$STATE_FILE" "$ROOT/sys-orchestrd" --group sys-orchestrd-test >/tmp/sys-orchestrd-group-mode.log 2>&1
+ORCH_PID="$(last_pid)"
+sleep 2
+curl --silent --show-error --unix-socket "$SYSTEM_PROPERTY_SOCK" -X POST -H 'Content-Type: application/json' -d '{"key":"persist.group.sys-orchestrd-test","value":"1","persistent":true}' http://unix/v1/property >/dev/null
+sleep 2
+assert_contains "$CALL_LOG" "start ${UNIT_NAME}.service"
+: >"$CALL_LOG"
+curl --silent --show-error --unix-socket "$SYSTEM_PROPERTY_SOCK" -X POST -H 'Content-Type: application/json' -d '{"key":"persist.group.sys-orchestrd-test","value":"0","persistent":true}' http://unix/v1/property >/dev/null
+sleep 2
+assert_contains "$CALL_LOG" "stop ${UNIT_NAME}.service"
+if kill -0 "$ORCH_PID" >/dev/null 2>&1; then
+  kill -TERM "$ORCH_PID"
+fi
+wait "$ORCH_PID" || true
+
 printf 'sys-orchestrd integration test passed.\n'

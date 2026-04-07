@@ -23,26 +23,33 @@ import (
 )
 
 type daemon struct {
-	unit      string
-	userMode  bool
-	runtime   string
-	state     string
-	stateFile string
-	logger    *log.Logger
-	groups    map[string]bool
+	unit       string
+	group      string
+	userMode   bool
+	runtime    string
+	state      string
+	stateFile  string
+	logger     *log.Logger
+	groups     map[string]bool
+	groupUnits []string
 }
 
 func main() {
 	unit := flag.String("unit", "", "target unit")
+	group := flag.String("group", "", "target group")
 	userMode := flag.Bool("user", false, "run in user mode")
 	flag.Parse()
-	if strings.TrimSpace(*unit) == "" {
-		fmt.Fprintln(os.Stderr, "sys-orchestrd requires --unit")
+	if (strings.TrimSpace(*unit) == "") == (strings.TrimSpace(*group) == "") {
+		fmt.Fprintln(os.Stderr, "sys-orchestrd requires exactly one of --unit or --group")
 		os.Exit(2)
 	}
 	logger := log.New(os.Stdout, "sys-orchestrd: ", log.LstdFlags)
 	runtime := visionapi.RuntimeDir(*userMode, os.Getenv("XDG_RUNTIME_DIR"))
-	d := &daemon{unit: strings.TrimSpace(*unit), userMode: *userMode, runtime: runtime, logger: logger, state: "waiting", stateFile: orchestrdStateFile(strings.TrimSpace(*unit), *userMode, runtime), groups: map[string]bool{}}
+	stateName := strings.TrimSpace(*unit)
+	if strings.TrimSpace(*group) != "" {
+		stateName = "group:" + strings.TrimSpace(*group)
+	}
+	d := &daemon{unit: strings.TrimSpace(*unit), group: strings.TrimSpace(*group), userMode: *userMode, runtime: runtime, logger: logger, state: "waiting", stateFile: orchestrdStateFile(stateName, *userMode, runtime), groups: map[string]bool{}}
 	if err := d.run(); err != nil {
 		logger.Printf("fatal: %v", err)
 		os.Exit(1)
@@ -52,6 +59,9 @@ func main() {
 func (d *daemon) run() error {
 	if err := os.MkdirAll(filepath.Dir(d.stateFile), 0755); err != nil {
 		return err
+	}
+	if d.isGroupMode() {
+		return d.runGroup()
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -66,6 +76,30 @@ func (d *daemon) run() error {
 		case <-ctx.Done():
 			d.writeState("stopping", "signal")
 			_ = d.runServicectl("stop")
+			d.publishState("stopping", "signal")
+			return nil
+		case event := <-events:
+			if exitErr := d.handleEvent(event); exitErr != nil {
+				return exitErr
+			}
+		}
+	}
+}
+
+func (d *daemon) runGroup() error {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	d.writeState("waiting", "startup")
+	if err := d.initialGroupSync(); err != nil {
+		return err
+	}
+	events := make(chan visionapi.EventEnvelope, 32)
+	go d.watchEvents(ctx, events)
+	for {
+		select {
+		case <-ctx.Done():
+			d.writeState("stopping", "signal")
+			_ = d.runGroupAction("stop", reverseServiceOrder(d.groupUnits))
 			d.publishState("stopping", "signal")
 			return nil
 		case event := <-events:
@@ -140,7 +174,7 @@ func (d *daemon) handleEvent(event visionapi.EventEnvelope) error {
 		}
 	case visionapi.SourceSysPropertyd:
 		if event.Kind == visionapi.KindGroupChanged {
-			return d.handleGroupChange(event)
+			return d.handleGroupScopedChange(event)
 		}
 	}
 	return nil
@@ -240,6 +274,16 @@ func (d *daemon) runServicectl(action string) error {
 	return cmd.Run()
 }
 
+func (d *daemon) runGroupAction(action string, units []string) error {
+	for _, unit := range units {
+		d.unit = strings.TrimSuffix(strings.TrimSpace(unit), ".service") + ".service"
+		if err := d.runServicectl(action); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (d *daemon) writeState(state string, reason string) {
 	d.state = state
 	content := strings.Join([]string{
@@ -253,7 +297,7 @@ func (d *daemon) writeState(state string, reason string) {
 
 func (d *daemon) publishState(state string, reason string) {
 	payload := map[string]string{"state": state, "reason": reason}
-	envelope := visionapi.NewEvent(visionapi.ModeForUser(d.userMode), visionapi.SourceSysOrchestrd, visionapi.KindUnitOrchestration, d.unit, payload)
+	envelope := visionapi.NewEvent(visionapi.ModeForUser(d.userMode), visionapi.SourceSysOrchestrd, visionapi.KindUnitOrchestration, d.objectName(), payload)
 	data, err := json.Marshal(envelope)
 	if err != nil {
 		return
@@ -265,6 +309,24 @@ func (d *daemon) publishState(state string, reason string) {
 	}
 	defer conn.Close()
 	_, _ = conn.Write(data)
+}
+
+func (d *daemon) queryGroup(name string) (visionapi.GroupState, bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	resp, err := d.sysvisionRequest(ctx, "/v1/query/group/"+url.PathEscape(strings.TrimSpace(name)))
+	if err != nil {
+		return visionapi.GroupState{}, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return visionapi.GroupState{}, false
+	}
+	var out visionapi.GroupState
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return visionapi.GroupState{}, false
+	}
+	return out, true
 }
 
 func (d *daemon) queryUnit(unit string) (visionapi.UnitSnapshot, error) {
