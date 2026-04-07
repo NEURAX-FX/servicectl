@@ -118,3 +118,21 @@ func queryGroupState(name string) (visionapi.GroupState, bool) {
 	}
 	return out, true
 }
+
+func queryUnitGroups(name string) (visionapi.UnitGroupsResponse, bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	resp, err := propertyRequest(ctx, http.MethodGet, "/v1/unit-groups/"+url.PathEscape(strings.TrimSpace(name)), nil)
+	if err != nil {
+		return visionapi.UnitGroupsResponse{}, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return visionapi.UnitGroupsResponse{}, false
+	}
+	var out visionapi.UnitGroupsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return visionapi.UnitGroupsResponse{}, false
+	}
+	return out, true
+}

@@ -189,6 +189,9 @@ func (d *daemon) serveAPI(mode string) error {
 	mux.HandleFunc("/v1/query/group/", func(w http.ResponseWriter, r *http.Request) {
 		d.handlePropertyQuery(mode, w, r, "/v1/group/"+strings.TrimPrefix(r.URL.Path, "/v1/query/group/"))
 	})
+	mux.HandleFunc("/v1/query/unit-groups/", func(w http.ResponseWriter, r *http.Request) {
+		d.handlePropertyQuery(mode, w, r, "/v1/unit-groups/"+strings.TrimPrefix(r.URL.Path, "/v1/query/unit-groups/"))
+	})
 	server := &http.Server{Handler: mux}
 	return server.Serve(listener)
 }

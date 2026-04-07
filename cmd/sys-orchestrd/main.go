@@ -29,6 +29,7 @@ type daemon struct {
 	state     string
 	stateFile string
 	logger    *log.Logger
+	groups    map[string]bool
 }
 
 func main() {
@@ -41,7 +42,7 @@ func main() {
 	}
 	logger := log.New(os.Stdout, "sys-orchestrd: ", log.LstdFlags)
 	runtime := visionapi.RuntimeDir(*userMode, os.Getenv("XDG_RUNTIME_DIR"))
-	d := &daemon{unit: strings.TrimSpace(*unit), userMode: *userMode, runtime: runtime, logger: logger, state: "waiting", stateFile: orchestrdStateFile(strings.TrimSpace(*unit), *userMode, runtime)}
+	d := &daemon{unit: strings.TrimSpace(*unit), userMode: *userMode, runtime: runtime, logger: logger, state: "waiting", stateFile: orchestrdStateFile(strings.TrimSpace(*unit), *userMode, runtime), groups: map[string]bool{}}
 	if err := d.run(); err != nil {
 		logger.Printf("fatal: %v", err)
 		os.Exit(1)
@@ -89,12 +90,14 @@ func (d *daemon) initialSync(ctx context.Context) error {
 			continue
 		}
 		if snapshot.State == "STARTED" || snapshot.Phase == "ready" || snapshot.ChildState == "running" {
+			d.refreshGroups()
 			d.writeState("running", "initial-state")
 			d.publishState("running", "initial-state")
 			return nil
 		}
 		d.writeState("starting", "initial-start")
 		d.publishState("starting", "initial-start")
+		d.refreshGroups()
 		if err := d.runServicectl("start"); err != nil {
 			d.writeState("failed", "start-error")
 			d.publishState("failed", "start-error")
@@ -135,7 +138,44 @@ func (d *daemon) handleEvent(event visionapi.EventEnvelope) error {
 			d.writeState("waiting", "stopped")
 			d.publishState("waiting", "stopped")
 		}
+	case visionapi.SourceSysPropertyd:
+		if event.Kind == visionapi.KindGroupChanged {
+			return d.handleGroupChange(event)
+		}
 	}
+	return nil
+}
+
+func (d *daemon) handleGroupChange(event visionapi.EventEnvelope) error {
+	group := strings.TrimSpace(event.Payload["group"])
+	if group == "" || !d.groups[group] {
+		return nil
+	}
+	enabled := strings.EqualFold(strings.TrimSpace(event.Payload["enabled"]), "yes") || strings.TrimSpace(event.Payload["enabled"]) == "1"
+	if enabled {
+		snapshot, err := d.queryUnit(d.unit)
+		if err != nil {
+			return err
+		}
+		if snapshot.State == "STARTED" || snapshot.Phase == "ready" || snapshot.ChildState == "running" {
+			return nil
+		}
+		d.writeState("starting", "group-enabled:"+group)
+		d.publishState("starting", "group-enabled:"+group)
+		if err := d.runServicectl("start"); err != nil {
+			d.writeState("failed", "group-start-error:"+group)
+			d.publishState("failed", "group-start-error:"+group)
+			return err
+		}
+		return nil
+	}
+	d.writeState("stopping", "group-disabled:"+group)
+	d.publishState("stopping", "group-disabled:"+group)
+	if err := d.runServicectl("stop"); err != nil {
+		return err
+	}
+	d.writeState("waiting", "group-disabled:"+group)
+	d.publishState("waiting", "group-disabled:"+group)
 	return nil
 }
 
@@ -153,7 +193,7 @@ func (d *daemon) watchEvents(ctx context.Context, events chan<- visionapi.EventE
 }
 
 func (d *daemon) watchEventsOnce(ctx context.Context, events chan<- visionapi.EventEnvelope) error {
-	path := "/v1/watch?mode=" + url.QueryEscape(visionapi.ModeForUser(d.userMode)) + "&unit=" + url.QueryEscape(d.unit)
+	path := "/v1/watch?mode=" + url.QueryEscape(visionapi.ModeForUser(d.userMode))
 	resp, err := d.sysvisionRequest(ctx, path)
 	if err != nil {
 		return err
@@ -243,6 +283,36 @@ func (d *daemon) queryUnit(unit string) (visionapi.UnitSnapshot, error) {
 		return visionapi.UnitSnapshot{}, err
 	}
 	return snapshot, nil
+}
+
+func (d *daemon) refreshGroups() {
+	resp, ok := d.queryUnitGroups(d.unit)
+	if !ok {
+		return
+	}
+	groups := make(map[string]bool, len(resp.Groups))
+	for _, group := range resp.Groups {
+		groups[strings.TrimSpace(group.Name)] = true
+	}
+	d.groups = groups
+}
+
+func (d *daemon) queryUnitGroups(unit string) (visionapi.UnitGroupsResponse, bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	resp, err := d.sysvisionRequest(ctx, "/v1/query/unit-groups/"+url.PathEscape(strings.TrimSuffix(unit, ".service")+".service"))
+	if err != nil {
+		return visionapi.UnitGroupsResponse{}, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return visionapi.UnitGroupsResponse{}, false
+	}
+	var out visionapi.UnitGroupsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return visionapi.UnitGroupsResponse{}, false
+	}
+	return out, true
 }
 
 func (d *daemon) sysvisionRequest(ctx context.Context, path string) (*http.Response, error) {

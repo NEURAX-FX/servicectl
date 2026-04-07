@@ -126,6 +126,7 @@ func (d *daemon) run() error {
 	mux.HandleFunc("/v1/properties", d.handleProperties)
 	mux.HandleFunc("/v1/groups", d.handleGroups)
 	mux.HandleFunc("/v1/group/", d.handleGroup)
+	mux.HandleFunc("/v1/unit-groups/", d.handleUnitGroups)
 	mux.HandleFunc("/v1/resolve-target", d.handleResolveTarget)
 	mux.HandleFunc("/v1/reload", d.handleReload)
 	mux.HandleFunc("/v1/property", d.handlePropertyUpdate)
@@ -216,6 +217,28 @@ func (d *daemon) handleGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, d.groupStateLocked(name))
+}
+
+func (d *daemon) handleUnitGroups(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	unit := normalizeUnitName(strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/v1/unit-groups/")))
+	if unit == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	resp := visionapi.UnitGroupsResponse{GeneratedAt: time.Now().UTC().Format(time.RFC3339Nano), Unit: unit}
+	for _, name := range sortedGroupNames(d.groups) {
+		group := d.groupStateLocked(name)
+		if groupContainsUnit(group, unit) {
+			resp.Groups = append(resp.Groups, group)
+		}
+	}
+	writeJSON(w, resp)
 }
 
 func (d *daemon) handleResolveTarget(w http.ResponseWriter, r *http.Request) {
@@ -562,6 +585,35 @@ func sortedMapKeys(values map[string]string) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+func sortedGroupNames(values map[string]groupDefinition) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func normalizeUnitName(name string) string {
+	clean := strings.TrimSpace(name)
+	if clean == "" {
+		return ""
+	}
+	if !strings.HasSuffix(clean, ".service") {
+		clean += ".service"
+	}
+	return clean
+}
+
+func groupContainsUnit(group visionapi.GroupState, unit string) bool {
+	for _, candidate := range group.Units {
+		if normalizeUnitName(candidate) == unit {
+			return true
+		}
+	}
+	return false
 }
 
 func writeJSON(w http.ResponseWriter, value any) {

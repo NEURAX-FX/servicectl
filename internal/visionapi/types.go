@@ -197,6 +197,12 @@ type GroupsResponse struct {
 	Groups      []GroupState `json:"groups"`
 }
 
+type UnitGroupsResponse struct {
+	GeneratedAt string       `json:"generated_at"`
+	Unit        string       `json:"unit"`
+	Groups      []GroupState `json:"groups"`
+}
+
 type UnitsResponse struct {
 	GeneratedAt string         `json:"generated_at"`
 	Units       []UnitSnapshot `json:"units"`

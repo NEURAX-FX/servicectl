@@ -12,9 +12,12 @@ TEST_ROOT="$(mktemp -d /tmp/sys-orchestrd-runtime.XXXXXX)"
 SYSTEM_RUNTIME_ROOT="$TEST_ROOT/system"
 USER_RUNTIME_ROOT="$TEST_ROOT/user"
 SYSTEM_SYSVISION_INGRESS="$SYSTEM_RUNTIME_ROOT/sysvision/events.sock"
+SYSTEM_PROPERTY_SOCK="$SYSTEM_RUNTIME_ROOT/sys-propertyd.sock"
 FAKE_CTL="$(mktemp /tmp/fake-servicectl.XXXXXX)"
 CALL_LOG="$(mktemp /tmp/sys-orchestrd-calls.XXXXXX)"
 STATE_FILE="$(mktemp /tmp/sys-orchestrd-state.XXXXXX)"
+GROUP_DIR="/etc/servicectl/groups.d"
+GROUP_FILE="$GROUP_DIR/sys-orchestrd-group.conf"
 PIDS=()
 
 start_bg() {
@@ -35,7 +38,7 @@ cleanup() {
       wait "$pid" >/dev/null 2>&1 || true
     fi
   done
-  rm -f "$UNIT_PATH" "$USER_UNIT_PATH" "$FAKE_CTL" "$CALL_LOG" "$STATE_FILE"
+  rm -f "$UNIT_PATH" "$USER_UNIT_PATH" "$GROUP_FILE" "$FAKE_CTL" "$CALL_LOG" "$STATE_FILE"
   rm -rf "$TEST_ROOT"
 }
 trap cleanup EXIT
@@ -51,8 +54,16 @@ assert_contains() {
 
 printf 'Building sys-orchestrd test binaries...\n'
 go build -o "$ROOT/servicectl" .
+go build -o "$ROOT/sys-propertyd" ./cmd/sys-propertyd
 go build -o "$ROOT/sysvisiond" ./cmd/sysvisiond
 go build -o "$ROOT/sys-orchestrd" ./cmd/sys-orchestrd
+
+mkdir -p "$GROUP_DIR"
+cat >"$GROUP_FILE" <<EOF
+[Group]
+Name=sys-orchestrd-test
+Units=${UNIT_NAME}.service
+EOF
 
 cat >"$UNIT_PATH" <<'EOF'
 [Unit]
@@ -82,6 +93,7 @@ chmod +x "$FAKE_CTL"
 
 printf 'Starting servicectl API and sysvisiond...\n'
 start_bg env SERVICECTL_SYSTEM_RUNTIME_ROOT="$SYSTEM_RUNTIME_ROOT" SERVICECTL_USER_RUNTIME_ROOT="$USER_RUNTIME_ROOT" "$ROOT/servicectl" serve-api >/tmp/servicectl-api.log 2>&1
+start_bg env SERVICECTL_SYSTEM_RUNTIME_ROOT="$SYSTEM_RUNTIME_ROOT" SERVICECTL_USER_RUNTIME_ROOT="$USER_RUNTIME_ROOT" "$ROOT/sys-propertyd" >/tmp/sys-propertyd.log 2>&1
 start_bg env SERVICECTL_SYSTEM_RUNTIME_ROOT="$SYSTEM_RUNTIME_ROOT" SERVICECTL_USER_RUNTIME_ROOT="$USER_RUNTIME_ROOT" "$ROOT/sysvisiond" >/tmp/sysvisiond.log 2>&1
 sleep 2
 
@@ -117,6 +129,24 @@ start_bg env SERVICECTL_SYSTEM_RUNTIME_ROOT="$SYSTEM_RUNTIME_ROOT" SERVICECTL_US
 ORCH_PID="$(last_pid)"
 sleep 2
 assert_contains "$CALL_LOG" "--user start ${USER_UNIT_NAME}.service"
+if kill -0 "$ORCH_PID" >/dev/null 2>&1; then
+  kill -TERM "$ORCH_PID"
+fi
+wait "$ORCH_PID" || true
+
+printf 'Checking sys-orchestrd group-driven start and stop...\n'
+: >"$CALL_LOG"
+start_bg env SERVICECTL_SYSTEM_RUNTIME_ROOT="$SYSTEM_RUNTIME_ROOT" SERVICECTL_USER_RUNTIME_ROOT="$USER_RUNTIME_ROOT" SERVICECTL_BIN="$FAKE_CTL" SYS_ORCHESTRD_STATE_FILE="$STATE_FILE" "$ROOT/sys-orchestrd" --unit "${UNIT_NAME}.service" >/tmp/sys-orchestrd-group.log 2>&1
+ORCH_PID="$(last_pid)"
+sleep 2
+: >"$CALL_LOG"
+curl --silent --show-error --unix-socket "$SYSTEM_PROPERTY_SOCK" -X POST -H 'Content-Type: application/json' -d '{"key":"persist.group.sys-orchestrd-test","value":"1","persistent":true}' http://unix/v1/property >/dev/null
+sleep 2
+assert_contains "$CALL_LOG" "start ${UNIT_NAME}.service"
+: >"$CALL_LOG"
+curl --silent --show-error --unix-socket "$SYSTEM_PROPERTY_SOCK" -X POST -H 'Content-Type: application/json' -d '{"key":"persist.group.sys-orchestrd-test","value":"0","persistent":true}' http://unix/v1/property >/dev/null
+sleep 2
+assert_contains "$CALL_LOG" "stop ${UNIT_NAME}.service"
 if kill -0 "$ORCH_PID" >/dev/null 2>&1; then
   kill -TERM "$ORCH_PID"
 fi
