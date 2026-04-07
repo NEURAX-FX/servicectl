@@ -169,4 +169,20 @@ if kill -0 "$ORCH_PID" >/dev/null 2>&1; then
 fi
 wait "$ORCH_PID" || true
 
+printf 'Checking missing group does not fatal loop...\n'
+: >"$CALL_LOG"
+start_bg env SERVICECTL_SYSTEM_RUNTIME_ROOT="$SYSTEM_RUNTIME_ROOT" SERVICECTL_USER_RUNTIME_ROOT="$USER_RUNTIME_ROOT" SERVICECTL_BIN="$FAKE_CTL" SYS_ORCHESTRD_STATE_FILE="$STATE_FILE" "$ROOT/sys-orchestrd" --group missing-group >/tmp/sys-orchestrd-missing-group.log 2>&1
+ORCH_PID="$(last_pid)"
+sleep 3
+if ! kill -0 "$ORCH_PID" >/dev/null 2>&1; then
+  printf 'assertion failed: sys-orchestrd exited for missing group\n' >&2
+  exit 1
+fi
+assert_contains "$STATE_FILE" "state=waiting"
+assert_contains "$STATE_FILE" "reason=group-not-found:missing-group"
+if kill -0 "$ORCH_PID" >/dev/null 2>&1; then
+  kill -TERM "$ORCH_PID"
+fi
+wait "$ORCH_PID" || true
+
 printf 'sys-orchestrd integration test passed.\n'

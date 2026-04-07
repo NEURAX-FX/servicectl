@@ -13,6 +13,23 @@ type groupActionTarget struct {
 	original string
 }
 
+func explicitGroupExists(name string) bool {
+	if strings.TrimSpace(name) == "" {
+		return false
+	}
+	_, ok := queryGroupState(strings.TrimSpace(name))
+	return ok
+}
+
+func isGroupAction(action string) bool {
+	switch strings.TrimSpace(action) {
+	case "enable", "disable", "is-enabled", "status":
+		return true
+	default:
+		return false
+	}
+}
+
 func normalizeGroupScopedUnitName(raw string) string {
 	clean := strings.TrimSpace(raw)
 	if clean == "" {
@@ -24,35 +41,37 @@ func normalizeGroupScopedUnitName(raw string) string {
 	return clean
 }
 
-func parseGroupFlagValue(raw string) (groupActionTarget, bool) {
-	value := strings.TrimSpace(raw)
-	if value == "" {
-		return groupActionTarget{}, false
+func resolveGroupSelector(raw string) (groupActionTarget, error) {
+	selector := strings.TrimSpace(raw)
+	if selector == "" {
+		return groupActionTarget{}, fmt.Errorf("group selector is required")
 	}
-	return groupActionTarget{group: value, via: "group", original: value}, true
-}
-
-func resolveGroupActionTarget(raw string) (groupActionTarget, error) {
-	if virtual, ok := parseVirtualTarget(raw); ok {
+	if virtual, ok := parseVirtualTarget(selector); ok {
 		if virtual.kind == "group" {
+			if !explicitGroupExists(virtual.name) {
+				return groupActionTarget{}, fmt.Errorf("group %s not found", virtual.name)
+			}
 			return groupActionTarget{group: virtual.name, via: "group", original: raw}, nil
 		}
-		resolved, err := propertyResolveTarget(raw)
+		resolved, err := propertyResolveTarget(selector)
 		if err != nil {
 			return groupActionTarget{}, err
 		}
 		return groupActionTarget{group: resolved.Group, via: "target", original: raw}, nil
 	}
-	unitName := normalizeGroupScopedUnitName(raw)
-	if unitName == "" {
-		return groupActionTarget{}, fmt.Errorf("group target is required")
+	if explicitGroupExists(selector) {
+		return groupActionTarget{group: selector, via: "group", original: raw}, nil
 	}
+	if resolved, err := propertyResolveTarget(selector + ".target"); err == nil && strings.TrimSpace(resolved.Group) != "" {
+		return groupActionTarget{group: resolved.Group, via: "target", original: selector + ".target"}, nil
+	}
+	unitName := normalizeGroupScopedUnitName(selector)
 	resp, ok := queryUnitGroups(unitName)
 	if !ok {
-		return groupActionTarget{}, fmt.Errorf("could not resolve groups for %s", unitName)
+		return groupActionTarget{}, fmt.Errorf("could not resolve group selector %s", selector)
 	}
 	if len(resp.Groups) == 0 {
-		return groupActionTarget{}, fmt.Errorf("%s does not belong to a group", unitName)
+		return groupActionTarget{}, fmt.Errorf("could not resolve group selector %s", selector)
 	}
 	if len(resp.Groups) > 1 {
 		groups := make([]string, 0, len(resp.Groups))
@@ -65,12 +84,7 @@ func resolveGroupActionTarget(raw string) (groupActionTarget, error) {
 }
 
 func shouldAutoResolveGroupAction(action string) bool {
-	switch action {
-	case "enable", "disable", "is-enabled", "status":
-		return true
-	default:
-		return false
-	}
+	return isGroupAction(action)
 }
 
 func maybeResolveGroupActionTarget(action string, raw string) (groupActionTarget, bool, error) {
@@ -78,7 +92,7 @@ func maybeResolveGroupActionTarget(action string, raw string) (groupActionTarget
 		return groupActionTarget{}, false, nil
 	}
 	if _, ok := parseVirtualTarget(raw); ok {
-		target, err := resolveGroupActionTarget(raw)
+		target, err := resolveGroupSelector(raw)
 		return target, true, err
 	}
 	unitName := normalizeGroupScopedUnitName(raw)
@@ -147,6 +161,36 @@ func handleGroupAction(action string, target groupActionTarget) (int, bool) {
 		return 0, true
 	}
 	return 0, false
+}
+
+func parseGroupInvocation(args []string, currentAction string, currentTargets []string, currentGroup string) (string, []string, string, bool, error) {
+	if strings.TrimSpace(currentGroup) == "" {
+		return currentAction, currentTargets, currentGroup, false, nil
+	}
+	if isGroupAction(currentAction) {
+		return currentAction, currentTargets, currentGroup, true, nil
+	}
+	if isGroupAction(currentGroup) {
+		if strings.TrimSpace(currentAction) == "" {
+			return currentAction, currentTargets, currentGroup, true, fmt.Errorf("group name is required")
+		}
+		return currentGroup, currentTargets, currentAction, true, nil
+	}
+	if len(args) >= 2 && isGroupAction(args[0]) {
+		return args[0], args[2:], args[1], true, nil
+	}
+	return currentAction, currentTargets, currentGroup, true, fmt.Errorf("unknown group action %q", currentAction)
+}
+
+func resolveExplicitGroupInvocation(action string, selector string) (groupActionTarget, error) {
+	target, err := resolveGroupSelector(selector)
+	if err != nil {
+		return groupActionTarget{}, err
+	}
+	if !isGroupAction(action) {
+		return groupActionTarget{}, fmt.Errorf("unknown group action %q", action)
+	}
+	return target, nil
 }
 
 func groupMembershipLabel(resp visionapi.UnitGroupsResponse) string {

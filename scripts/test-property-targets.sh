@@ -107,6 +107,15 @@ assert_contains "$GROUP_OUTPUT" "group:pipewire enabled"
 assert_contains "$GROUP_OUTPUT" "${UNIT_NAME}.service"
 assert_contains "$GROUP_OUTPUT" "pipewire.target"
 
+printf 'Checking alternate --group syntax...\n'
+env SERVICECTL_SYSTEM_RUNTIME_ROOT="$SYSTEM_RUNTIME_ROOT" SERVICECTL_USER_RUNTIME_ROOT="$USER_RUNTIME_ROOT" "$ROOT/servicectl" --group status pipewire >"$GROUP_OUTPUT"
+assert_contains "$GROUP_OUTPUT" "group:pipewire enabled"
+
+printf 'Checking selector-based --group enable path...\n'
+env SERVICECTL_SYSTEM_RUNTIME_ROOT="$SYSTEM_RUNTIME_ROOT" SERVICECTL_USER_RUNTIME_ROOT="$USER_RUNTIME_ROOT" "$ROOT/servicectl" disable pipewire.target >/dev/null
+env SERVICECTL_SYSTEM_RUNTIME_ROOT="$SYSTEM_RUNTIME_ROOT" SERVICECTL_USER_RUNTIME_ROOT="$USER_RUNTIME_ROOT" "$ROOT/servicectl" --group enable pipewire >"$SHOW_OUTPUT"
+assert_contains "$SHOW_OUTPUT" "Enabled group:pipewire"
+
 printf 'Checking service auto-resolution to unique group...\n'
 env SERVICECTL_SYSTEM_RUNTIME_ROOT="$SYSTEM_RUNTIME_ROOT" SERVICECTL_USER_RUNTIME_ROOT="$USER_RUNTIME_ROOT" "$ROOT/servicectl" status "$UNIT_NAME" >"$GROUP_OUTPUT"
 assert_contains "$GROUP_OUTPUT" "group:pipewire enabled"

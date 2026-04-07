@@ -1,8 +1,8 @@
 package main
 
 import (
-	"fmt"
 	"strings"
+	"time"
 
 	"servicectl/internal/visionapi"
 )
@@ -21,7 +21,10 @@ func (d *daemon) objectName() string {
 func (d *daemon) initialGroupSync() error {
 	state, ok := d.queryGroup(d.group)
 	if !ok {
-		return fmt.Errorf("group %s not found", d.group)
+		d.groupUnits = nil
+		d.writeState("waiting", "group-not-found:"+d.group)
+		d.publishState("waiting", "group-not-found:"+d.group)
+		return nil
 	}
 	d.groupUnits = state.Units
 	if !state.Enabled {
@@ -47,14 +50,19 @@ func (d *daemon) handleGroupScopedChange(event visionapi.EventEnvelope) error {
 		return nil
 	}
 	if d.isGroupMode() {
+		if group == d.group {
+			state, ok := d.queryGroup(d.group)
+			if !ok {
+				d.groupUnits = nil
+				d.writeState("waiting", "group-not-found:"+d.group)
+				d.publishState("waiting", "group-not-found:"+d.group)
+				return nil
+			}
+			d.groupUnits = state.Units
+		}
 		if group != d.group {
 			return nil
 		}
-		state, ok := d.queryGroup(d.group)
-		if !ok {
-			return nil
-		}
-		d.groupUnits = state.Units
 		enabled := strings.EqualFold(strings.TrimSpace(event.Payload["enabled"]), "yes") || strings.TrimSpace(event.Payload["enabled"]) == "1"
 		if enabled {
 			d.writeState("starting", "group-enabled:"+group)
@@ -81,6 +89,25 @@ func (d *daemon) handleGroupScopedChange(event visionapi.EventEnvelope) error {
 		return nil
 	}
 	return d.handleGroupChange(event)
+}
+
+func (d *daemon) maintainMissingGroup(ctxDone <-chan struct{}) {
+	if !d.isGroupMode() {
+		return
+	}
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctxDone:
+			return
+		case <-ticker.C:
+			if len(d.groupUnits) > 0 {
+				continue
+			}
+			_ = d.initialGroupSync()
+		}
+	}
 }
 
 func reverseServiceOrder(units []string) []string {

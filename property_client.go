@@ -122,6 +122,7 @@ func queryGroupState(name string) (visionapi.GroupState, bool) {
 func queryUnitGroups(name string) (visionapi.UnitGroupsResponse, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 	defer cancel()
+	_ = propertyReload()
 	resp, err := propertyRequest(ctx, http.MethodGet, "/v1/unit-groups/"+url.PathEscape(strings.TrimSpace(name)), nil)
 	if err != nil {
 		return visionapi.UnitGroupsResponse{}, false

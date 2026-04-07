@@ -1287,6 +1287,7 @@ parsedFlags:
 		printHelp()
 		return
 	}
+	originalArgs := append([]string{}, args...)
 	if len(args) == 1 {
 		switch args[0] {
 		case "help", "-h", "--help":
@@ -1300,6 +1301,17 @@ parsedFlags:
 	}
 
 	action, targets := args[0], args[1:]
+	if parsedAction, parsedTargets, parsedGroup, handled, err := parseGroupInvocation(originalArgs, action, targets, groupFlag); handled {
+		if err != nil {
+			fmt.Println(err)
+			fmt.Println("Usage: servicectl [--user] --group <group> <command>")
+			fmt.Println("   or: servicectl [--user] --group <command> <group>")
+			os.Exit(1)
+		}
+		action = parsedAction
+		targets = parsedTargets
+		groupFlag = parsedGroup
+	}
 	if action == "serve-api" {
 		os.Exit(servicectlAPIServer())
 	}
@@ -1384,9 +1396,9 @@ parsedFlags:
 
 	exitCode := 0
 	if groupFlag != "" {
-		target, ok := parseGroupFlagValue(groupFlag)
-		if !ok {
-			fmt.Println("group name is required")
+		target, err := resolveExplicitGroupInvocation(action, groupFlag)
+		if err != nil {
+			fmt.Println(err)
 			os.Exit(1)
 		}
 		if code, handled := handleGroupAction(action, target); handled {

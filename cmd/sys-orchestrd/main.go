@@ -95,6 +95,7 @@ func (d *daemon) runGroup() error {
 	}
 	events := make(chan visionapi.EventEnvelope, 32)
 	go d.watchEvents(ctx, events)
+	go d.maintainMissingGroup(ctx.Done())
 	for {
 		select {
 		case <-ctx.Done():
