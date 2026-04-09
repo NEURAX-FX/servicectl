@@ -8,5 +8,6 @@
 /notify-sleeper
 /test-envd
 /sys-propertyd
+/docs/
 *.bak
 *.zip
