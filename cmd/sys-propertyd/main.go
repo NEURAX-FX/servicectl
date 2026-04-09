@@ -17,9 +17,9 @@ import (
 	"servicectl/internal/visionapi"
 )
 
-type propertyState struct {
-	Persistent map[string]string `json:"persistent"`
-	Runtime    map[string]string `json:"runtime"`
+type propertyStore struct {
+	Persistent    map[string]string            `json:"persistent"`
+	RuntimeByMode map[string]map[string]string `json:"runtime_by_mode"`
 }
 
 type groupDefinition struct {
@@ -28,24 +28,25 @@ type groupDefinition struct {
 	Targets []string
 }
 
+type definitionSet struct {
+	Groups  map[string]groupDefinition
+	Targets map[string]string
+}
+
 type daemon struct {
-	mode       string
-	userMode   bool
 	runtimeDir string
 	statePath  string
-	groupDirs  []string
-	targetDirs []string
 	logger     *syncLogger
 	mu         sync.Mutex
-	state      propertyState
-	groups     map[string]groupDefinition
-	targets    map[string]string
+	store      propertyStore
+	defsByMode map[string]definitionSet
 }
 
 type propertyUpdateRequest struct {
 	Key        string `json:"key"`
 	Value      string `json:"value"`
 	Persistent bool   `json:"persistent"`
+	Mode       string `json:"mode,omitempty"`
 }
 
 type resolveTargetResponse struct {
@@ -63,32 +64,24 @@ func (l *syncLogger) Printf(format string, args ...any) {
 }
 
 func main() {
-	userMode := flag.Bool("user", false, "run in user mode")
+	userMode := flag.Bool("user", false, "deprecated no-op")
 	flag.Parse()
-	runtimeDir := visionapi.RuntimeDir(*userMode, os.Getenv("XDG_RUNTIME_DIR"))
-	home := strings.TrimSpace(os.Getenv("HOME"))
-	statePath := "/var/lib/servicectl/properties/state"
-	groupDirs := []string{"/etc/servicectl/groups.d"}
-	targetDirs := []string{"/etc/servicectl/targets.d"}
-	if *userMode {
-		statePath = filepath.Join(home, ".local/state/servicectl/properties/state")
-		groupDirs = []string{filepath.Join(home, ".config/servicectl/groups.d"), "/usr/lib/servicectl/groups.d"}
-		targetDirs = []string{filepath.Join(home, ".config/servicectl/targets.d"), "/usr/lib/servicectl/targets.d"}
-	} else {
-		groupDirs = append(groupDirs, "/usr/lib/servicectl/groups.d")
-		targetDirs = append(targetDirs, "/usr/lib/servicectl/targets.d")
-	}
+	_ = *userMode
 	d := &daemon{
-		mode:       visionapi.ModeForUser(*userMode),
-		userMode:   *userMode,
-		runtimeDir: runtimeDir,
-		statePath:  statePath,
-		groupDirs:  groupDirs,
-		targetDirs: targetDirs,
+		runtimeDir: visionapi.SystemRuntimeDir,
+		statePath:  "/var/lib/servicectl/properties/state",
 		logger:     &syncLogger{},
-		state:      propertyState{Persistent: map[string]string{}, Runtime: map[string]string{}},
-		groups:     map[string]groupDefinition{},
-		targets:    map[string]string{},
+		store: propertyStore{
+			Persistent: map[string]string{},
+			RuntimeByMode: map[string]map[string]string{
+				visionapi.ModeSystem: {},
+				visionapi.ModeUser:   {},
+			},
+		},
+		defsByMode: map[string]definitionSet{
+			visionapi.ModeSystem: {Groups: map[string]groupDefinition{}, Targets: map[string]string{}},
+			visionapi.ModeUser:   {Groups: map[string]groupDefinition{}, Targets: map[string]string{}},
+		},
 	}
 	if err := d.run(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -103,13 +96,16 @@ func (d *daemon) run() error {
 	if err := os.MkdirAll(d.runtimeDir, 0755); err != nil {
 		return err
 	}
-	if err := d.reloadDefinitions(); err != nil {
+	if err := d.reloadDefinitionsLocked(visionapi.ModeSystem); err != nil {
+		return err
+	}
+	if err := d.reloadDefinitionsLocked(visionapi.ModeUser); err != nil {
 		return err
 	}
 	if err := d.loadState(); err != nil {
 		return err
 	}
-	socketPath := visionapi.PropertySocketPathForMode(d.mode)
+	socketPath := visionapi.SystemPropertySocketPath()
 	if err := visionapi.PrepareUnixStreamListener(socketPath); err != nil {
 		return err
 	}
@@ -139,8 +135,14 @@ func (d *daemon) handleReload(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
+	mode, err := requestMode(r)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]string{"error": err.Error()})
+		return
+	}
 	d.mu.Lock()
-	err := d.reloadDefinitions()
+	err = d.reloadDefinitionsLocked(mode)
 	d.mu.Unlock()
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -155,17 +157,24 @@ func (d *daemon) handleProperties(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
+	mode, err := requestMode(r)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]string{"error": err.Error()})
+		return
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	keys := make([]string, 0, len(d.state.Persistent)+len(d.state.Runtime))
+	runtimeState := d.runtimeStateLocked(mode)
+	keys := make([]string, 0, len(d.store.Persistent)+len(runtimeState))
 	seen := make(map[string]bool)
-	for key := range d.state.Persistent {
+	for key := range d.store.Persistent {
 		if !seen[key] {
 			seen[key] = true
 			keys = append(keys, key)
 		}
 	}
-	for key := range d.state.Runtime {
+	for key := range runtimeState {
 		if !seen[key] {
 			seen[key] = true
 			keys = append(keys, key)
@@ -174,7 +183,7 @@ func (d *daemon) handleProperties(w http.ResponseWriter, r *http.Request) {
 	sort.Strings(keys)
 	resp := visionapi.PropertiesResponse{GeneratedAt: time.Now().UTC().Format(time.RFC3339Nano)}
 	for _, key := range keys {
-		value, persistent := d.effectiveValueLocked(key)
+		value, persistent := d.effectiveValueLocked(mode, key)
 		resp.Properties = append(resp.Properties, visionapi.PropertyState{Key: key, Value: value, Persistent: persistent})
 	}
 	writeJSON(w, resp)
@@ -185,16 +194,23 @@ func (d *daemon) handleGroups(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
+	mode, err := requestMode(r)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]string{"error": err.Error()})
+		return
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	names := make([]string, 0, len(d.groups))
-	for name := range d.groups {
+	defs := d.definitionsLocked(mode)
+	names := make([]string, 0, len(defs.Groups))
+	for name := range defs.Groups {
 		names = append(names, name)
 	}
 	sort.Strings(names)
 	resp := visionapi.GroupsResponse{GeneratedAt: time.Now().UTC().Format(time.RFC3339Nano)}
 	for _, name := range names {
-		resp.Groups = append(resp.Groups, d.groupStateLocked(name))
+		resp.Groups = append(resp.Groups, d.groupStateLocked(mode, name))
 	}
 	writeJSON(w, resp)
 }
@@ -204,6 +220,12 @@ func (d *daemon) handleGroup(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
+	mode, err := requestMode(r)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]string{"error": err.Error()})
+		return
+	}
 	name := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/v1/group/"))
 	if name == "" {
 		w.WriteHeader(http.StatusBadRequest)
@@ -211,17 +233,24 @@ func (d *daemon) handleGroup(w http.ResponseWriter, r *http.Request) {
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if _, ok := d.groups[name]; !ok {
+	defs := d.definitionsLocked(mode)
+	if _, ok := defs.Groups[name]; !ok {
 		w.WriteHeader(http.StatusNotFound)
 		writeJSON(w, map[string]string{"error": "group not found"})
 		return
 	}
-	writeJSON(w, d.groupStateLocked(name))
+	writeJSON(w, d.groupStateLocked(mode, name))
 }
 
 func (d *daemon) handleUnitGroups(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	mode, err := requestMode(r)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]string{"error": err.Error()})
 		return
 	}
 	unit := normalizeUnitName(strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/v1/unit-groups/")))
@@ -231,9 +260,10 @@ func (d *daemon) handleUnitGroups(w http.ResponseWriter, r *http.Request) {
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	defs := d.definitionsLocked(mode)
 	resp := visionapi.UnitGroupsResponse{GeneratedAt: time.Now().UTC().Format(time.RFC3339Nano), Unit: unit}
-	for _, name := range sortedGroupNames(d.groups) {
-		group := d.groupStateLocked(name)
+	for _, name := range sortedGroupNames(defs.Groups) {
+		group := d.groupStateLocked(mode, name)
 		if groupContainsUnit(group, unit) {
 			resp.Groups = append(resp.Groups, group)
 		}
@@ -246,8 +276,16 @@ func (d *daemon) handleResolveTarget(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
+	mode, err := requestMode(r)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]string{"error": err.Error()})
+		return
+	}
 	input := strings.TrimSpace(r.URL.Query().Get("name"))
-	group, ok := d.resolveVirtualLocked(input)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	group, ok := d.resolveVirtualLocked(mode, input)
 	if !ok {
 		w.WriteHeader(http.StatusNotFound)
 		writeJSON(w, map[string]string{"error": "target/group not found"})
@@ -267,7 +305,7 @@ func (d *daemon) handlePropertyUpdate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]string{"error": err.Error()})
 		return
 	}
-	if err := d.setProperty(strings.TrimSpace(req.Key), strings.TrimSpace(req.Value), req.Persistent); err != nil {
+	if err := d.setProperty(strings.TrimSpace(req.Key), strings.TrimSpace(req.Value), req.Persistent, strings.TrimSpace(req.Mode)); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		writeJSON(w, map[string]string{"error": err.Error()})
 		return
@@ -275,15 +313,22 @@ func (d *daemon) handlePropertyUpdate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]string{"result": "ok"})
 }
 
-func (d *daemon) setProperty(key string, value string, persistent bool) error {
+func (d *daemon) setProperty(key string, value string, persistent bool, mode string) error {
 	if key == "" {
 		return fmt.Errorf("property key is required")
 	}
+	if !persistent {
+		var err error
+		mode, err = normalizeMode(mode)
+		if err != nil {
+			return err
+		}
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	store := d.state.Runtime
-	if persistent {
-		store = d.state.Persistent
+	store := d.store.Persistent
+	if !persistent {
+		store = d.runtimeStateLocked(mode)
 	}
 	if value == "" || value == "0" || strings.EqualFold(value, "false") {
 		delete(store, key)
@@ -294,13 +339,7 @@ func (d *daemon) setProperty(key string, value string, persistent bool) error {
 	if err := d.saveStateLocked(); err != nil {
 		return err
 	}
-	d.publishLocked(visionapi.KindPropertyChanged, map[string]string{"key": key, "value": value, "persistent": yesNo(persistent)})
-	if group := strings.TrimPrefix(key, "persist.group."); group != key {
-		d.publishLocked(visionapi.KindGroupChanged, map[string]string{"group": group, "enabled": yesNo(value == "1"), "persistent": "yes"})
-	}
-	if group := strings.TrimPrefix(key, "prop.group."); group != key {
-		d.publishLocked(visionapi.KindGroupChanged, map[string]string{"group": group, "enabled": yesNo(value == "1"), "persistent": "no"})
-	}
+	d.publishPropertyChangeLocked(key, value, persistent, mode)
 	return nil
 }
 
@@ -324,24 +363,30 @@ func (d *daemon) loadState() error {
 		}
 		key := strings.TrimSpace(parts[0])
 		value := strings.TrimSpace(parts[1])
-		if strings.HasPrefix(key, "persist.") {
-			d.state.Persistent[key] = value
-			continue
-		}
-		if strings.HasPrefix(key, "prop.") {
-			d.state.Runtime[key] = value
+		switch {
+		case strings.HasPrefix(key, "persist."):
+			d.store.Persistent[key] = value
+		case strings.HasPrefix(key, "prop.system."):
+			d.runtimeStateLocked(visionapi.ModeSystem)[strings.TrimPrefix(key, "prop.system.")] = value
+		case strings.HasPrefix(key, "prop.user."):
+			d.runtimeStateLocked(visionapi.ModeUser)[strings.TrimPrefix(key, "prop.user.")] = value
+		case strings.HasPrefix(key, "prop."):
+			d.runtimeStateLocked(visionapi.ModeSystem)[key] = value
 		}
 	}
 	return scanner.Err()
 }
 
 func (d *daemon) saveStateLocked() error {
-	lines := make([]string, 0, len(d.state.Persistent)+len(d.state.Runtime))
-	for _, key := range sortedMapKeys(d.state.Persistent) {
-		lines = append(lines, key+"="+d.state.Persistent[key])
+	lines := make([]string, 0, len(d.store.Persistent)+len(d.runtimeStateLocked(visionapi.ModeSystem))+len(d.runtimeStateLocked(visionapi.ModeUser)))
+	for _, key := range sortedMapKeys(d.store.Persistent) {
+		lines = append(lines, key+"="+d.store.Persistent[key])
 	}
-	for _, key := range sortedMapKeys(d.state.Runtime) {
-		lines = append(lines, key+"="+d.state.Runtime[key])
+	for _, key := range sortedMapKeys(d.runtimeStateLocked(visionapi.ModeSystem)) {
+		lines = append(lines, "prop.system."+key+"="+d.runtimeStateLocked(visionapi.ModeSystem)[key])
+	}
+	for _, key := range sortedMapKeys(d.runtimeStateLocked(visionapi.ModeUser)) {
+		lines = append(lines, "prop.user."+key+"="+d.runtimeStateLocked(visionapi.ModeUser)[key])
 	}
 	content := strings.Join(lines, "\n")
 	if content != "" {
@@ -350,14 +395,15 @@ func (d *daemon) saveStateLocked() error {
 	return os.WriteFile(d.statePath, []byte(content), 0644)
 }
 
-func (d *daemon) reloadDefinitions() error {
-	autoGroups, autoTargets, err := importSystemdTargets(systemdUnitDirs(d.userMode))
+func (d *daemon) reloadDefinitionsLocked(mode string) error {
+	autoGroups, autoTargets, err := importSystemdTargets(systemdUnitDirs(mode))
 	if err != nil {
 		return err
 	}
+	groupDirs, targetDirs := propertyDefinitionDirs(mode)
 	explicitGroups := map[string]groupDefinition{}
 	explicitTargets := map[string]string{}
-	for _, dir := range d.groupDirs {
+	for _, dir := range groupDirs {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			continue
@@ -378,7 +424,7 @@ func (d *daemon) reloadDefinitions() error {
 			}
 		}
 	}
-	for _, dir := range d.targetDirs {
+	for _, dir := range targetDirs {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			continue
@@ -401,9 +447,16 @@ func (d *daemon) reloadDefinitions() error {
 	if err := validateTargetGroups(groups, targets); err != nil {
 		return err
 	}
-	d.groups = groups
-	d.targets = targets
+	d.defsByMode[mode] = definitionSet{Groups: groups, Targets: targets}
 	return nil
+}
+
+func propertyDefinitionDirs(mode string) ([]string, []string) {
+	home := strings.TrimSpace(os.Getenv("HOME"))
+	if mode == visionapi.ModeUser {
+		return []string{filepath.Join(home, ".config/servicectl/groups.d"), "/usr/lib/servicectl/groups.d"}, []string{filepath.Join(home, ".config/servicectl/targets.d"), "/usr/lib/servicectl/targets.d"}
+	}
+	return []string{"/etc/servicectl/groups.d", "/usr/lib/servicectl/groups.d"}, []string{"/etc/servicectl/targets.d", "/usr/lib/servicectl/targets.d"}
 }
 
 func parseGroupConfig(path string) ([]groupDefinition, error) {
@@ -526,43 +579,50 @@ func uniqueSortedStrings(values []string) []string {
 	return result
 }
 
-func (d *daemon) resolveVirtualLocked(input string) (string, bool) {
+func (d *daemon) resolveVirtualLocked(mode string, input string) (string, bool) {
+	defs := d.definitionsLocked(mode)
 	input = strings.TrimSpace(input)
 	if strings.HasPrefix(input, "group:") {
 		group := strings.TrimSpace(strings.TrimPrefix(input, "group:"))
-		_, ok := d.groups[group]
+		_, ok := defs.Groups[group]
 		return group, ok
 	}
-	group, ok := d.targets[input]
+	group, ok := defs.Targets[input]
 	return group, ok
 }
 
-func (d *daemon) effectiveValueLocked(key string) (string, bool) {
-	if value, ok := d.state.Runtime[key]; ok {
+func (d *daemon) effectiveValueLocked(mode string, key string) (string, bool) {
+	if value, ok := d.runtimeStateLocked(mode)[key]; ok {
 		return value, false
 	}
-	if value, ok := d.state.Persistent[key]; ok {
+	if value, ok := d.store.Persistent[key]; ok {
 		return value, true
 	}
 	return "", false
 }
 
-func (d *daemon) groupStateLocked(name string) visionapi.GroupState {
-	def := d.groups[name]
-	value := strings.TrimSpace(d.state.Runtime["prop.group."+name])
+func (d *daemon) groupStateLocked(mode string, name string) visionapi.GroupState {
+	defs := d.definitionsLocked(mode)
+	def := defs.Groups[name]
+	value := strings.TrimSpace(d.runtimeStateLocked(mode)["prop.group."+name])
 	persistent := false
 	if value == "" {
-		value = strings.TrimSpace(d.state.Persistent["persist.group."+name])
+		value = strings.TrimSpace(d.store.Persistent["persist.group."+name])
 		persistent = value != ""
 	}
 	return visionapi.GroupState{
 		Name:       name,
 		Units:      append([]string{}, def.Units...),
-		Enabled:    value == "1" || strings.EqualFold(value, "true") || strings.EqualFold(value, "yes"),
+		Enabled:    externalManagedValueEnabled(value),
 		Persistent: persistent,
 		Targets:    append([]string{}, def.Targets...),
 		UpdatedAt:  time.Now().UTC().Format(time.RFC3339Nano),
 	}
+}
+
+func externalManagedValueEnabled(value string) bool {
+	value = strings.TrimSpace(strings.ToLower(value))
+	return value == "1" || value == "true" || value == "yes" || value == "on"
 }
 
 func yesNo(value bool) string {
@@ -572,19 +632,66 @@ func yesNo(value bool) string {
 	return "no"
 }
 
-func (d *daemon) publishLocked(kind string, payload map[string]string) {
-	envelope := visionapi.NewEvent(d.mode, visionapi.SourceSysPropertyd, kind, "", payload)
+func (d *daemon) publishPropertyChangeLocked(key string, value string, persistent bool, mode string) {
+	payload := map[string]string{"key": key, "value": value, "persistent": yesNo(persistent)}
+	if !persistent {
+		d.publishModeLocked(mode, visionapi.KindPropertyChanged, payload)
+	} else {
+		d.publishModeLocked(visionapi.ModeSystem, visionapi.KindPropertyChanged, payload)
+		d.publishModeLocked(visionapi.ModeUser, visionapi.KindPropertyChanged, payload)
+	}
+	if group := strings.TrimPrefix(key, "persist.group."); group != key {
+		groupPayload := map[string]string{"group": group, "enabled": yesNo(value == "1"), "persistent": "yes"}
+		d.publishModeLocked(visionapi.ModeSystem, visionapi.KindGroupChanged, groupPayload)
+		d.publishModeLocked(visionapi.ModeUser, visionapi.KindGroupChanged, groupPayload)
+	}
+	if group := strings.TrimPrefix(key, "prop.group."); group != key {
+		d.publishModeLocked(mode, visionapi.KindGroupChanged, map[string]string{"group": group, "enabled": yesNo(value == "1"), "persistent": "no"})
+	}
+}
+
+func (d *daemon) publishModeLocked(mode string, kind string, payload map[string]string) {
+	envelope := visionapi.NewEvent(mode, visionapi.SourceSysPropertyd, kind, "", payload)
 	data, err := json.Marshal(envelope)
 	if err != nil {
 		return
 	}
-	addr := &net.UnixAddr{Name: visionapi.SysvisionIngressSocketPathForMode(d.mode), Net: "unixgram"}
+	addr := &net.UnixAddr{Name: visionapi.SysvisionIngressSocketPathForMode(mode), Net: "unixgram"}
 	conn, err := net.DialUnix("unixgram", nil, addr)
 	if err != nil {
 		return
 	}
 	defer conn.Close()
 	_, _ = conn.Write(data)
+}
+
+func (d *daemon) runtimeStateLocked(mode string) map[string]string {
+	state, ok := d.store.RuntimeByMode[mode]
+	if !ok {
+		state = map[string]string{}
+		d.store.RuntimeByMode[mode] = state
+	}
+	return state
+}
+
+func (d *daemon) definitionsLocked(mode string) definitionSet {
+	defs, ok := d.defsByMode[mode]
+	if !ok {
+		return definitionSet{Groups: map[string]groupDefinition{}, Targets: map[string]string{}}
+	}
+	return defs
+}
+
+func normalizeMode(mode string) (string, error) {
+	mode = strings.TrimSpace(strings.ToLower(mode))
+	if mode == visionapi.ModeSystem || mode == visionapi.ModeUser {
+		return mode, nil
+	}
+	return "", fmt.Errorf("mode is required")
+}
+
+func requestMode(r *http.Request) (string, error) {
+	return normalizeMode(r.URL.Query().Get("mode"))
 }
 
 func sortedMapKeys(values map[string]string) []string {

@@ -290,9 +290,6 @@ func ensureSysPropertydSource() error {
 		return err
 	}
 	runLine := sysPropertydBinaryPath()
-	if userMode() {
-		runLine += " --user"
-	}
 	runScript := strings.Join([]string{"#!/usr/bin/execlineb -P", runLine, ""}, "\n")
 	if err := os.WriteFile(filepath.Join(serviceDir, "run"), []byte(runScript), 0755); err != nil {
 		return err

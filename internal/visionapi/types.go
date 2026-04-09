@@ -103,11 +103,15 @@ func ServicectlEventsSocketPathForMode(mode string) string {
 }
 
 func PropertySocketPath(userMode bool, xdgRuntimeDir string) string {
-	return filepath.Join(RuntimeDir(userMode, xdgRuntimeDir), SystemPropertySockName)
+	return filepath.Join(RuntimeDir(false, xdgRuntimeDir), SystemPropertySockName)
 }
 
 func PropertySocketPathForMode(mode string) string {
-	return filepath.Join(PlaneForMode(mode).RuntimeDir, SystemPropertySockName)
+	return filepath.Join(RuntimeDir(false, ""), SystemPropertySockName)
+}
+
+func SystemPropertySocketPath() string {
+	return filepath.Join(RuntimeDir(false, ""), SystemPropertySockName)
 }
 
 func SystemSysvisionDir() string {

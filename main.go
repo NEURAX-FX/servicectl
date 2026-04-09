@@ -29,6 +29,8 @@ Core commands:
   stop          Stop unit(s)
   restart       Restart unit(s)
   reload        Reload unit(s)
+  external-manage Mark unit(s) as externally managed
+  external-unmanage Clear external-managed state for unit(s)
   kill          Send a signal to unit(s); default SIGTERM
   status        Show systemctl-like status output
   show          Show detailed diagnostic view
@@ -329,9 +331,10 @@ func printStatusFromSnapshot(unitName string, snapshot visionapi.UnitSnapshot) {
 	orchName := s6OrchestrdServiceName(unitName)
 	orchPID := orchestratorPID(unitName)
 	enabledState := "disabled"
-	if isEnabledWithS6(unitName) {
+	if isEffectivelyEnabled(unitName) {
 		enabledState = "enabled"
 	}
+	management := managementState(unitName)
 	busState := currentBusState()
 	activeLine := formatActiveLine(state)
 	if snapshot.ManagedBy == "sys-notifyd" {
@@ -355,6 +358,7 @@ func printStatusFromSnapshot(unitName string, snapshot visionapi.UnitSnapshot) {
 		printStatusKV("Result", "exit-code (status="+exitStatus+")")
 	}
 	printStatusKV("Enabled", enabledState)
+	printStatusKV("Management", management)
 	if snapshot.ManagedBy == "sys-notifyd" && managerPID != "" && managerPID != "0" {
 		printStatusKV("Manager PID", managerPID)
 	}
@@ -820,9 +824,10 @@ func showUnitFromSnapshot(unitName string, snapshot visionapi.UnitSnapshot) int 
 	orchState := orchestratorState(unitName)
 	orchPID := orchestratorPID(unitName)
 	enabledState := "disabled"
-	if isEnabledWithS6(unitName) {
+	if isEffectivelyEnabled(unitName) {
 		enabledState = "enabled"
 	}
+	management := managementState(unitName)
 	busMeta := currentBusMeta()
 	busConnected := "offline"
 	if busMeta.available {
@@ -837,7 +842,7 @@ func showUnitFromSnapshot(unitName string, snapshot visionapi.UnitSnapshot) int 
 	managementMode := managedServiceModeForUnit(unit, socketUnit)
 	printSection("Unit", [][2]string{{"Name", unitName + ".service"}, {"Mode", config.Mode}, {"Description", unit.Description}, {"Source", unit.SourcePath}, {"Managed By", snapshot.ManagedBy}, {"Activation Model", string(managementMode)}, {"Dinit", snapshot.DinitName}, {"Logger", snapshot.LoggerName}, {"Log Tag", journalIdentifier(unitName)}})
 	printSection("Runtime", [][2]string{{"State", emptyDash(snapshot.State)}, {"Activation", emptyDash(snapshot.Activation)}, {"Process ID", emptyDash(snapshot.ProcessID)}, {"Manager PID", emptyDash(snapshot.ManagerPID)}, {"Main PID", emptyDash(snapshot.MainPID)}, {"Phase", emptyDash(snapshot.Phase)}, {"Child", emptyDash(snapshot.ChildState)}, {"Status", emptyDash(snapshot.Status)}, {"Failure", emptyDash(snapshot.Failure)}, {"Notify Sock", emptyDash(snapshot.NotifySocket)}, {"State File", emptyDash(snapshot.StateFile)}})
-	printSection("Orchestration", [][2]string{{"Enabled", enabledState}, {"Orchestrator", orchName}, {"Orchestrator Scope", config.Mode}, {"Orchestrator State", emptyDash(mapValue(orchState, "state"))}, {"Orchestrator PID", emptyDash(orchPID)}, {"Orchestrator State File", orchestratorStateFilePath(unitName)}, {"Last Orchestration Event", emptyDash(mapValue(orchState, "state"))}, {"Last Orchestration Reason", emptyDash(mapValue(orchState, "reason"))}})
+	printSection("Orchestration", [][2]string{{"Enabled", enabledState}, {"Management", management}, {"Orchestrator", orchName}, {"Orchestrator Scope", config.Mode}, {"Orchestrator State", emptyDash(mapValue(orchState, "state"))}, {"Orchestrator PID", emptyDash(orchPID)}, {"Orchestrator State File", orchestratorStateFilePath(unitName)}, {"Last Orchestration Event", emptyDash(mapValue(orchState, "state"))}, {"Last Orchestration Reason", emptyDash(mapValue(orchState, "reason"))}})
 	printSection("S6", [][2]string{{"S6 Service", orchName}, {"S6 Bundle", s6BundleName()}, {"S6 Source Root", s6SourceRoot()}, {"S6 Source Dir", s6OrchestrdSourceDir(unitName)}, {"In Default Bundle", boolWord(s6ContentsContain(s6DefaultContentsPath(), s6BundleName()) && s6ContentsContain(s6DefaultContentsPath(), s6SysvisiondServiceName()) && s6ContentsContain(s6DefaultContentsPath(), s6ServicectlAPIServiceName()))}, {"In Enable Bundle", boolWord(s6ContentsContain(s6BundleContentsPath(), orchName))}})
 	printSection("Control Plane", [][2]string{{"Servicectl API Socket", visionapi.ServicectlSocketPath(userMode(), runtimeDir())}, {"Servicectl Events Socket", visionapi.ServicectlEventsSocketPath(userMode(), runtimeDir())}, {"Sysvisiond Socket", visionapi.SysvisionSocketPath(userMode(), runtimeDir())}, {"Sysvisiond Ingress", visionapi.SysvisionIngressSocketPath(userMode(), runtimeDir())}, {"Bus Connected", busConnected}, {"Bus Error", emptyDash(busMeta.errorText)}})
 	printSection("Exec", [][2]string{{"Service Type", unit.Type}, {"ExecStart", backendCmd}, {"ExecReload", reloadCmd}, {"ExecStop", stopCmd}, {"WorkingDir", unit.WorkingDirectory}, {"User", unit.User}, {"Group", unit.Group}})
@@ -863,12 +868,17 @@ func recursiveStart(unitName string, visited map[string]bool, opts startOptions)
 
 	for _, d := range hardStartDependencies(unit) {
 		if _, ok := resolvedDependencyServiceName(d); ok {
-			recursiveInstall(strings.TrimSuffix(resolveUnitAlias(d), ".service"), make(map[string]bool), installOptionsForUnit(strings.TrimSuffix(resolveUnitAlias(d), ".service"), false))
-			if shouldSkipFailedDependency(d) {
-				fmt.Printf("Skipping failed auxiliary dependency: %s\n", strings.TrimSuffix(resolveUnitAlias(d), ".service"))
+			depName := strings.TrimSuffix(resolveUnitAlias(d), ".service")
+			if isExternallyManaged(depName) {
+				fmt.Printf("Using external-managed dependency: %s\n", depName)
 				continue
 			}
-			if !recursiveStart(strings.TrimSuffix(resolveUnitAlias(d), ".service"), visited, opts) {
+			recursiveInstall(depName, make(map[string]bool), installOptionsForUnit(depName, false))
+			if shouldSkipFailedDependency(d) {
+				fmt.Printf("Skipping failed auxiliary dependency: %s\n", depName)
+				continue
+			}
+			if !recursiveStart(depName, visited, opts) {
 				return false
 			}
 		}
@@ -877,6 +887,10 @@ func recursiveStart(unitName string, visited map[string]bool, opts startOptions)
 	for _, d := range degradableStartDependencies(unit) {
 		if _, ok := resolvedDependencyServiceName(d); ok {
 			depName := strings.TrimSuffix(resolveUnitAlias(d), ".service")
+			if isExternallyManaged(depName) {
+				fmt.Printf("Using external-managed degradable dependency: %s\n", depName)
+				continue
+			}
 			recursiveInstall(depName, make(map[string]bool), installOptionsForUnit(depName, false))
 			if shouldSkipFailedDependency(d) {
 				fmt.Printf("Skipping failed degradable dependency: %s\n", depName)
@@ -1333,6 +1347,13 @@ parsedFlags:
 			}
 		}
 	}
+	if action == "external-manage" || action == "external-unmanage" {
+		if len(targets) == 0 {
+			fmt.Println("Usage: servicectl [--user] external-manage <unit...>")
+			fmt.Println("   or: servicectl [--user] external-unmanage <unit...>")
+			return
+		}
+	}
 
 	if action != "logs" && action != "dinit" {
 		if err := ensureUserModeReady(); err != nil {
@@ -1460,6 +1481,14 @@ parsedFlags:
 			}
 			fmt.Printf("%s %s\n", colorize("Restarted", styleGreen), cleanName)
 			publishServicectlCommandEvent(action, cleanName, "ok")
+		case "external-manage":
+			if code := externalManageUnit(cleanName, true); code != 0 {
+				exitCode = code
+			}
+		case "external-unmanage":
+			if code := externalManageUnit(cleanName, false); code != 0 {
+				exitCode = code
+			}
 		case "enable":
 			if _, err := parseSystemdUnit(cleanName); err != nil {
 				fmt.Println(err)
@@ -1481,7 +1510,7 @@ parsedFlags:
 			_ = stopUnit(cleanName)
 			fmt.Printf("Disabled %s\n", cleanName)
 		case "is-enabled":
-			if isEnabledWithS6(cleanName) {
+			if isEffectivelyEnabled(cleanName) {
 				fmt.Println("enabled")
 			} else {
 				fmt.Println("disabled")

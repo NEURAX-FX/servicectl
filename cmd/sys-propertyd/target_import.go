@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"servicectl/internal/visionapi"
 )
 
 type targetDefinition struct {
@@ -15,9 +17,9 @@ type targetDefinition struct {
 	Wants    []string
 }
 
-func systemdUnitDirs(userMode bool) []string {
+func systemdUnitDirs(mode string) []string {
 	home := strings.TrimSpace(os.Getenv("HOME"))
-	if userMode {
+	if strings.EqualFold(strings.TrimSpace(mode), visionapi.ModeUser) {
 		return []string{filepath.Join(home, ".config/systemd/user"), "/usr/lib/systemd/user"}
 	}
 	return []string{"/etc/systemd/system", "/usr/lib/systemd/system", "/lib/systemd/system"}

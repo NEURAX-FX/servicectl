@@ -368,11 +368,15 @@ func (d *daemon) propertyRequest(ctx context.Context, mode string, path string) 
 	transport := &http.Transport{
 		DialContext: func(ctx context.Context, network string, addr string) (net.Conn, error) {
 			var dialer net.Dialer
-			return dialer.DialContext(ctx, "unix", visionapi.PropertySocketPathForMode(mode))
+			return dialer.DialContext(ctx, "unix", visionapi.SystemPropertySocketPath())
 		},
 	}
 	client := &http.Client{Transport: transport}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://unix"+path, nil)
+	separator := "?"
+	if strings.Contains(path, "?") {
+		separator = "&"
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://unix"+path+separator+"mode="+url.QueryEscape(mode), nil)
 	if err != nil {
 		return nil, err
 	}

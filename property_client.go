@@ -18,6 +18,7 @@ type propertyUpdateRequest struct {
 	Key        string `json:"key"`
 	Value      string `json:"value"`
 	Persistent bool   `json:"persistent"`
+	Mode       string `json:"mode,omitempty"`
 }
 
 type resolvedTarget struct {
@@ -30,7 +31,7 @@ func propertyRequest(ctx context.Context, method string, path string, body any) 
 	transport := &http.Transport{
 		DialContext: func(ctx context.Context, network string, addr string) (net.Conn, error) {
 			var dialer net.Dialer
-			return dialer.DialContext(ctx, "unix", visionapi.PropertySocketPath(userMode(), runtimeDir()))
+			return dialer.DialContext(ctx, "unix", visionapi.SystemPropertySocketPath())
 		},
 	}
 	client := &http.Client{Transport: transport}
@@ -58,7 +59,7 @@ func propertyResolveTarget(raw string) (resolvedTarget, error) {
 	_ = propertyReload()
 	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 	defer cancel()
-	resp, err := propertyRequest(ctx, http.MethodGet, "/v1/resolve-target?name="+url.QueryEscape(strings.TrimSpace(raw)), nil)
+	resp, err := propertyRequest(ctx, http.MethodGet, "/v1/resolve-target?mode="+url.QueryEscape(config.Mode)+"&name="+url.QueryEscape(strings.TrimSpace(raw)), nil)
 	if err != nil {
 		return resolvedTarget{}, err
 	}
@@ -76,7 +77,7 @@ func propertyResolveTarget(raw string) (resolvedTarget, error) {
 func propertyReload() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 	defer cancel()
-	resp, err := propertyRequest(ctx, http.MethodPost, "/v1/reload", nil)
+	resp, err := propertyRequest(ctx, http.MethodPost, "/v1/reload?mode="+url.QueryEscape(config.Mode), nil)
 	if err != nil {
 		return err
 	}
@@ -90,7 +91,11 @@ func propertyReload() error {
 func propertySet(key string, value string, persistent bool) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 	defer cancel()
-	resp, err := propertyRequest(ctx, http.MethodPost, "/v1/property", propertyUpdateRequest{Key: key, Value: value, Persistent: persistent})
+	body := propertyUpdateRequest{Key: key, Value: value, Persistent: persistent}
+	if !persistent {
+		body.Mode = config.Mode
+	}
+	resp, err := propertyRequest(ctx, http.MethodPost, "/v1/property", body)
 	if err != nil {
 		return err
 	}
@@ -101,10 +106,33 @@ func propertySet(key string, value string, persistent bool) error {
 	return nil
 }
 
+func propertyValue(key string) (string, bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	resp, err := propertyRequest(ctx, http.MethodGet, "/v1/properties?mode="+url.QueryEscape(config.Mode), nil)
+	if err != nil {
+		return "", false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", false
+	}
+	var out visionapi.PropertiesResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", false
+	}
+	for _, prop := range out.Properties {
+		if strings.TrimSpace(prop.Key) == key {
+			return prop.Value, true
+		}
+	}
+	return "", false
+}
+
 func queryGroupState(name string) (visionapi.GroupState, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 	defer cancel()
-	resp, err := propertyRequest(ctx, http.MethodGet, "/v1/group/"+url.PathEscape(strings.TrimSpace(name)), nil)
+	resp, err := propertyRequest(ctx, http.MethodGet, "/v1/group/"+url.PathEscape(strings.TrimSpace(name))+"?mode="+url.QueryEscape(config.Mode), nil)
 	if err != nil {
 		return visionapi.GroupState{}, false
 	}
@@ -123,7 +151,7 @@ func queryUnitGroups(name string) (visionapi.UnitGroupsResponse, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 	defer cancel()
 	_ = propertyReload()
-	resp, err := propertyRequest(ctx, http.MethodGet, "/v1/unit-groups/"+url.PathEscape(strings.TrimSpace(name)), nil)
+	resp, err := propertyRequest(ctx, http.MethodGet, "/v1/unit-groups/"+url.PathEscape(strings.TrimSpace(name))+"?mode="+url.QueryEscape(config.Mode), nil)
 	if err != nil {
 		return visionapi.UnitGroupsResponse{}, false
 	}
