@@ -19,7 +19,7 @@ func printHelp() {
 	fmt.Println(`servicectl - systemd-like control for dinit with s6 orchestration
 
 Usage:
-  servicectl [--user] <command> [unit...]
+  servicectl [--user] [--force] <command> [unit...]
   servicectl [--user] logs [-f] [-n lines] <unit...>
   servicectl [--user] kill <unit...> [signal]
   servicectl [--user] dinit <args...>
@@ -50,6 +50,7 @@ Low-level / internal:
 Modes:
   default       System mode; runtime paths live under /run/servicectl and /s6/rc
   --user        User mode; runtime sockets live under /run/user/<uid>/servicectl
+  --force       Force cleanup of stale socket holders during start/restart
 
 Local API sockets:
   servicectl    /run/servicectl/servicectl.sock
@@ -603,39 +604,7 @@ func staleSocketHolderCleanupEnabled() bool {
 }
 
 func cleanupStaleSocketArtifacts(unitName string, socketUnit *SocketUnit) error {
-	paths := unixSocketListenPaths(socketUnit)
-	if len(paths) == 0 {
-		return nil
-	}
-	holders := staleSocketHolderPIDs(unitName, socketUnit)
-	if len(holders) > 0 {
-		if !staleSocketHolderCleanupEnabled() {
-			return fmt.Errorf("refusing to kill stale socket holders for %s: %s (set SERVICECTL_KILL_STALE_SOCKET_HOLDERS=1 to force cleanup)", unitName, formatPIDList(holders))
-		}
-		fmt.Printf("%s for %s: %s\n", colorize("Cleaning stale socket holders", styleYellow), unitName, formatPIDList(holders))
-		for _, pid := range holders {
-			_ = syscall.Kill(pid, syscall.SIGTERM)
-		}
-		waitForPIDsToExit(holders, 1500*time.Millisecond)
-		for _, pid := range holders {
-			_ = syscall.Kill(pid, syscall.SIGKILL)
-		}
-		waitForPIDsToExit(holders, 1500*time.Millisecond)
-		remaining := make([]int, 0, len(holders))
-		for _, pid := range holders {
-			if _, err := os.Stat(filepath.Join("/proc", strconv.Itoa(pid))); err == nil {
-				remaining = append(remaining, pid)
-			}
-		}
-		if len(remaining) > 0 {
-			return fmt.Errorf("stale socket holders for %s still running after cleanup: %s", unitName, formatPIDList(remaining))
-		}
-	}
-	for _, path := range paths {
-		_ = os.Remove(path)
-		_ = os.Remove(path + ".lock")
-	}
-	return nil
+	return cleanupSocketActivationState(unitName, socketUnit, startOptions{})
 }
 
 func reloadUnit(unitName string) int {
@@ -717,7 +686,7 @@ func stopBackendIfKnown(unitName string) int {
 	return runDinitctlWithStatus("stop", backendName)
 }
 
-func restartUnit(unitName string) int {
+func restartUnit(unitName string, opts startOptions) int {
 	if _, err := parseSystemdUnit(unitName); err != nil {
 		fmt.Println(err)
 		return 1
@@ -736,7 +705,7 @@ func restartUnit(unitName string) int {
 	}
 	fmt.Printf("Restarting target: %s\n", unitName)
 	recursiveInstall(unitName, make(map[string]bool), installOptionsForUnit(unitName, true))
-	if !recursiveStart(unitName, make(map[string]bool)) {
+	if !recursiveStart(unitName, make(map[string]bool), opts) {
 		return 1
 	}
 	if len(dependents) > 0 {
@@ -744,7 +713,7 @@ func restartUnit(unitName string) int {
 		fmt.Printf("Restoring dependents: %s\n", strings.Join(restore, ", "))
 		for _, dependent := range restore {
 			recursiveInstall(dependent, make(map[string]bool), installOptionsForUnit(dependent, true))
-			if !recursiveStart(dependent, make(map[string]bool)) {
+			if !recursiveStart(dependent, make(map[string]bool), opts) {
 				return 1
 			}
 		}
@@ -879,7 +848,7 @@ func showUnitFromSnapshot(unitName string, snapshot visionapi.UnitSnapshot) int 
 	return 0
 }
 
-func recursiveStart(unitName string, visited map[string]bool) bool {
+func recursiveStart(unitName string, visited map[string]bool, opts startOptions) bool {
 	cleanName := strings.TrimSuffix(unitName, ".service")
 	if visited[cleanName] {
 		return true
@@ -899,7 +868,7 @@ func recursiveStart(unitName string, visited map[string]bool) bool {
 				fmt.Printf("Skipping failed auxiliary dependency: %s\n", strings.TrimSuffix(resolveUnitAlias(d), ".service"))
 				continue
 			}
-			if !recursiveStart(strings.TrimSuffix(resolveUnitAlias(d), ".service"), visited) {
+			if !recursiveStart(strings.TrimSuffix(resolveUnitAlias(d), ".service"), visited, opts) {
 				return false
 			}
 		}
@@ -913,7 +882,7 @@ func recursiveStart(unitName string, visited map[string]bool) bool {
 				fmt.Printf("Skipping failed degradable dependency: %s\n", depName)
 				continue
 			}
-			if !recursiveStart(depName, visited) {
+			if !recursiveStart(depName, visited, opts) {
 				fmt.Printf("warning: degradable dependency %s failed during preflight; continuing with %s\n", depName, cleanName)
 			}
 		}
@@ -923,7 +892,7 @@ func recursiveStart(unitName string, visited map[string]bool) bool {
 	if mode != managedDirect {
 		if !isUnitStarted(cleanName) {
 			if mode == managedSocketd {
-				if err := cleanupStaleSocketArtifacts(cleanName, socketUnit); err != nil {
+				if err := cleanupSocketActivationState(cleanName, socketUnit, opts); err != nil {
 					fmt.Println(err)
 					return false
 				}
@@ -1255,6 +1224,7 @@ func printSyslogFallback(unitName string, lines string) {
 func main() {
 	args := os.Args[1:]
 	groupFlag := ""
+	forceFlag := false
 	if len(args) == 1 {
 		switch args[0] {
 		case "help", "-h", "--help":
@@ -1275,6 +1245,9 @@ func main() {
 			}
 			groupFlag = strings.TrimSpace(args[1])
 			args = args[2:]
+		case "--force":
+			forceFlag = true
+			args = args[1:]
 		default:
 			goto parsedFlags
 		}
@@ -1301,6 +1274,7 @@ parsedFlags:
 	}
 
 	action, targets := args[0], args[1:]
+	startOpts := startOptions{force: forceFlag}
 	if parsedAction, parsedTargets, parsedGroup, handled, err := parseGroupInvocation(originalArgs, action, targets, groupFlag); handled {
 		if err != nil {
 			fmt.Println(err)
@@ -1430,7 +1404,7 @@ parsedFlags:
 				continue
 			}
 			recursiveInstall(cleanName, make(map[string]bool), installOptionsForUnit(cleanName, false))
-			if !recursiveStart(cleanName, make(map[string]bool)) {
+			if !recursiveStart(cleanName, make(map[string]bool), startOpts) {
 				publishServicectlCommandEvent(action, cleanName, "error")
 				exitCode = 1
 				continue
@@ -1479,7 +1453,7 @@ parsedFlags:
 				exitCode = code
 			}
 		case "restart":
-			if code := restartUnit(cleanName); code != 0 {
+			if code := restartUnit(cleanName, startOpts); code != 0 {
 				publishServicectlCommandEvent(action, cleanName, "error")
 				exitCode = code
 				continue
