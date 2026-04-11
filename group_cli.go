@@ -84,7 +84,12 @@ func resolveGroupSelector(raw string) (groupActionTarget, error) {
 }
 
 func shouldAutoResolveGroupAction(action string) bool {
-	return isGroupAction(action)
+	switch strings.TrimSpace(action) {
+	case "enable", "disable", "is-enabled":
+		return true
+	default:
+		return false
+	}
 }
 
 func maybeResolveGroupActionTarget(action string, raw string) (groupActionTarget, bool, error) {

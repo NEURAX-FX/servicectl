@@ -1,11 +1,13 @@
 package main
 
+var externalManagedStateFunc = isExternallyManaged
+
 func isEffectivelyEnabled(unitName string) bool {
-	return effectiveEnabledFromFlags(isEnabledWithS6(unitName), isExternallyManaged(unitName))
+	return effectiveEnabledFromFlags(isEnabledWithS6(unitName), externalManagedStateFunc(unitName))
 }
 
 func managementState(unitName string) string {
-	return managementStateFromFlags(isEnabledWithS6(unitName), isExternallyManaged(unitName))
+	return managementStateFromFlags(isEnabledWithS6(unitName), externalManagedStateFunc(unitName))
 }
 
 func effectiveEnabledFromFlags(managed bool, external bool) bool {

@@ -118,7 +118,8 @@ assert_contains "$SHOW_OUTPUT" "Enabled group:pipewire"
 
 printf 'Checking service auto-resolution to unique group...\n'
 env SERVICECTL_SYSTEM_RUNTIME_ROOT="$SYSTEM_RUNTIME_ROOT" SERVICECTL_USER_RUNTIME_ROOT="$USER_RUNTIME_ROOT" "$ROOT/servicectl" status "$UNIT_NAME" >"$GROUP_OUTPUT"
-assert_contains "$GROUP_OUTPUT" "group:pipewire enabled"
+assert_contains "$GROUP_OUTPUT" "${UNIT_NAME}.service"
+assert_contains "$GROUP_OUTPUT" "Target audio demo"
 
 printf 'Checking is-enabled for target...\n'
 TARGET_ENABLED="$(env SERVICECTL_SYSTEM_RUNTIME_ROOT="$SYSTEM_RUNTIME_ROOT" SERVICECTL_USER_RUNTIME_ROOT="$USER_RUNTIME_ROOT" "$ROOT/servicectl" is-enabled pipewire.target || true)"

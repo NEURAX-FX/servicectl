@@ -322,7 +322,7 @@ func (u *Unit) GenerateDinit() string {
 	}
 	seen := make(map[string]bool)
 	for _, d := range hardStartDependencies(u) {
-		resolved, ok := resolvedDependencyServiceName(d)
+		resolved, ok := resolvedManagedDependencyServiceName(d)
 		if ok && resolved != u.Name && !seen[resolved] {
 			sb.WriteString(fmt.Sprintf("depends-on = %s\n", resolved))
 			seen[resolved] = true
@@ -352,7 +352,7 @@ func (u *Unit) GenerateNotifydDinit(mode managedServiceMode, socketUnit *SocketU
 	}
 	seen := make(map[string]bool)
 	for _, d := range hardStartDependencies(u) {
-		resolved, ok := resolvedDependencyServiceName(d)
+		resolved, ok := resolvedManagedDependencyServiceName(d)
 		if ok && resolved != managedName && !seen[resolved] {
 			sb.WriteString(fmt.Sprintf("depends-on = %s\n", resolved))
 			seen[resolved] = true
@@ -451,8 +451,15 @@ func recursiveInstall(unitName string, visited map[string]bool, opts installOpti
 	serviceName := managedServiceName(cleanName, mode)
 	knownToDinit := isDinitServiceKnown(serviceName)
 	for _, d := range hardStartDependencies(unit) {
+		cleanDep := strings.TrimSuffix(resolveUnitAlias(d), ".service")
+		if externalManagedStateFunc(cleanDep) {
+			if !installExternalManagedPlaceholder(cleanDep, opts) {
+				return
+			}
+			continue
+		}
 		if _, ok := resolvedDependencyServiceName(d); ok {
-			recursiveInstall(strings.TrimSuffix(resolveUnitAlias(d), ".service"), visited, opts)
+			recursiveInstall(cleanDep, visited, opts)
 		}
 	}
 	_ = os.MkdirAll(config.DinitGenDir, 0755)

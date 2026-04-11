@@ -869,7 +869,7 @@ func recursiveStart(unitName string, visited map[string]bool, opts startOptions)
 	for _, d := range hardStartDependencies(unit) {
 		if _, ok := resolvedDependencyServiceName(d); ok {
 			depName := strings.TrimSuffix(resolveUnitAlias(d), ".service")
-			if isExternallyManaged(depName) {
+			if externalManagedStateFunc(depName) {
 				fmt.Printf("Using external-managed dependency: %s\n", depName)
 				continue
 			}
@@ -887,7 +887,7 @@ func recursiveStart(unitName string, visited map[string]bool, opts startOptions)
 	for _, d := range degradableStartDependencies(unit) {
 		if _, ok := resolvedDependencyServiceName(d); ok {
 			depName := strings.TrimSuffix(resolveUnitAlias(d), ".service")
-			if isExternallyManaged(depName) {
+			if externalManagedStateFunc(depName) {
 				fmt.Printf("Using external-managed degradable dependency: %s\n", depName)
 				continue
 			}
