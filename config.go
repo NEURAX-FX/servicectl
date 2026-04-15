@@ -9,12 +9,13 @@ import (
 )
 
 type Config struct {
-	Mode            string
-	SystemdPaths    []string
-	DinitServiceDir string
-	DinitGenDir     string
-	UnitExtraDir    string
-	IsRoot          bool
+	Mode              string
+	SystemdPaths      []string
+	DinitServiceDir   string
+	DinitGenDir       string
+	ManagedRuntimeDir string
+	UnitExtraDir      string
+	IsRoot            bool
 }
 
 var (
@@ -41,6 +42,7 @@ func buildConfig(userMode bool) Config {
 		}
 		cfg.DinitServiceDir = filepath.Join(home, ".config/dinit.d")
 		cfg.DinitGenDir = filepath.Join(xdgRuntimeDir, "dinit.d/generated")
+		cfg.ManagedRuntimeDir = filepath.Join(runtimeDir(), "servicectl/managed")
 		cfg.UnitExtraDir = filepath.Join(home, ".config/servicectl/unitextra")
 		return cfg
 	}
@@ -52,6 +54,7 @@ func buildConfig(userMode bool) Config {
 	}
 	cfg.DinitServiceDir = "/etc/dinit.d"
 	cfg.DinitGenDir = "/run/dinit.d/generated"
+	cfg.ManagedRuntimeDir = "/run/servicectl/managed"
 	cfg.UnitExtraDir = filepath.Join(home, ".config/servicectl/unitextra")
 	return cfg
 }

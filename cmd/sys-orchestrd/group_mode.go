@@ -1,6 +1,9 @@
 package main
 
 import (
+	"bytes"
+	"os"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -34,7 +37,8 @@ func (d *daemon) initialGroupSync() error {
 	}
 	d.writeState("starting", "group-enabled")
 	d.publishState("starting", "group-enabled")
-	if err := d.runGroupAction("start", d.groupUnits); err != nil {
+	ordered := d.startOrderForGroupUnits(d.groupUnits)
+	if err := d.runGroupAction("start", ordered); err != nil {
 		d.writeState("failed", "group-start-error")
 		d.publishState("failed", "group-start-error")
 		return err
@@ -67,7 +71,8 @@ func (d *daemon) handleGroupScopedChange(event visionapi.EventEnvelope) error {
 		if enabled {
 			d.writeState("starting", "group-enabled:"+group)
 			d.publishState("starting", "group-enabled:"+group)
-			if err := d.runGroupAction("start", d.groupUnits); err != nil {
+			ordered := d.startOrderForGroupUnits(d.groupUnits)
+			if err := d.runGroupAction("start", ordered); err != nil {
 				d.writeState("failed", "group-start-error:"+group)
 				d.publishState("failed", "group-start-error:"+group)
 				return err
@@ -114,6 +119,40 @@ func reverseServiceOrder(units []string) []string {
 	result := make([]string, 0, len(units))
 	for i := len(units) - 1; i >= 0; i-- {
 		result = append(result, units[i])
+	}
+	return result
+}
+
+func (d *daemon) startOrderForGroupUnits(fallback []string) []string {
+	bin := os.Getenv("SERVICECTL_BIN")
+	if strings.TrimSpace(bin) == "" {
+		bin = "servicectl"
+	}
+	args := []string{"group-start-order", d.group}
+	if d.userMode {
+		args = append([]string{"--user"}, args...)
+	}
+	cmd := exec.Command(bin, args...)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	if err := cmd.Run(); err != nil {
+		return fallback
+	}
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	result := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if !strings.HasSuffix(line, ".service") {
+			line += ".service"
+		}
+		result = append(result, line)
+	}
+	if len(result) == 0 {
+		return fallback
 	}
 	return result
 }

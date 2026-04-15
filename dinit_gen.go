@@ -51,35 +51,12 @@ func managedServiceName(name string, mode managedServiceMode) string {
 	}
 }
 
-func notifydStatePath(name string, mode managedServiceMode) string {
-	managedName := managedServiceName(name, mode)
-	return filepath.Join(config.DinitGenDir, managedName+".state")
-}
-
 func notifydBinaryPath() string {
-	if exe, err := os.Executable(); err == nil {
-		candidate := filepath.Join(filepath.Dir(exe), "sys-notifyd")
-		if _, statErr := os.Stat(candidate); statErr == nil {
-			return candidate
-		}
-	}
-	if candidate, err := exec.LookPath("sys-notifyd"); err == nil {
-		return candidate
-	}
-	return "sys-notifyd"
+	return systemHelperBinaryPath("sys-notifyd")
 }
 
 func logdBinaryPath() string {
-	if exe, err := os.Executable(); err == nil {
-		candidate := filepath.Join(filepath.Dir(exe), "sys-logd")
-		if _, statErr := os.Stat(candidate); statErr == nil {
-			return candidate
-		}
-	}
-	if candidate, err := exec.LookPath("sys-logd"); err == nil {
-		return candidate
-	}
-	return "sys-logd"
+	return systemHelperBinaryPath("sys-logd")
 }
 
 func shouldManageWithNotifyd(unit *Unit, socketUnit *SocketUnit) bool {
@@ -370,7 +347,7 @@ func (u *Unit) GenerateNotifydDinit(mode managedServiceMode, socketUnit *SocketU
 		args = append(args, "-stop-command", dinitArg(stopCmd))
 	}
 	if strings.EqualFold(u.Type, "notify") {
-		notifyPath := filepath.Join(config.DinitGenDir, managedName+".notify.sock")
+		notifyPath := managedNotifySocketPath(u.Name, mode)
 		args = append(args, "-notify", "-notify-path", dinitArg(notifyPath), "-ready-timeout", "30s")
 	}
 	if timeout := normalizeTimeoutValue(u.TimeoutStartSec); timeout != "" {
@@ -464,6 +441,12 @@ func recursiveInstall(unitName string, visited map[string]bool, opts installOpti
 	}
 	_ = os.MkdirAll(config.DinitGenDir, 0755)
 	_ = os.MkdirAll(config.DinitServiceDir, 0755)
+	if mode != managedDirect {
+		if err := ensureManagedRuntimeDir(cleanName, mode, unit); err != nil {
+			fmt.Printf("Error creating runtime dir for %s: %v\n", cleanName, err)
+			return
+		}
+	}
 	if unit.PIDFile != "" {
 		pDir := filepath.Dir(unit.PIDFile)
 		if pDir != "/" && pDir != "." {

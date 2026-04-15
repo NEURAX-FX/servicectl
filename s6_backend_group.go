@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 )
 
@@ -48,27 +47,15 @@ func enableGroupWithS6(group string) error {
 	if err := os.WriteFile(filepath.Join(serviceDir, "run"), []byte(runScript), 0755); err != nil {
 		return err
 	}
-	deps := []string{}
-	if !userMode() {
-		deps = append(deps, "dinit")
-	}
-	deps = append(deps, s6SysvisiondServiceName())
-	depsContent := strings.Join(uniqueSortedStrings(deps), "\n")
-	if depsContent != "" {
-		depsContent += "\n"
-	}
-	if err := os.WriteFile(filepath.Join(serviceDir, "dependencies"), []byte(depsContent), 0644); err != nil {
+	entries, _ := os.ReadFile(s6BundleContentsPath())
+	bundleEntries := uniqueLinesPreserveOrder(string(entries))
+	serviceName := s6GroupOrchestrdServiceName(group)
+	bundleEntries = appendUniqueLinePreserveOrder(bundleEntries, serviceName)
+	if err := writeLineFile(s6BundleContentsPath(), bundleEntries); err != nil {
 		return err
 	}
-	entries, _ := os.ReadFile(s6BundleContentsPath())
-	bundleEntries := uniqueSortedLines(string(entries))
-	serviceName := s6GroupOrchestrdServiceName(group)
-	if !containsString(bundleEntries, serviceName) {
-		bundleEntries = append(bundleEntries, serviceName)
-		sort.Strings(bundleEntries)
-		if err := os.WriteFile(s6BundleContentsPath(), []byte(strings.Join(bundleEntries, "\n")+"\n"), 0644); err != nil {
-			return err
-		}
+	if err := refreshS6OrchestrdDependencies(); err != nil {
+		return err
 	}
 	if err := validateS6Sources(); err != nil {
 		return err
@@ -97,21 +84,20 @@ func disableGroupWithS6(group string) error {
 		}
 	}
 	entries, _ := os.ReadFile(s6BundleContentsPath())
-	bundleEntries := uniqueSortedLines(string(entries))
+	bundleEntries := uniqueLinesPreserveOrder(string(entries))
 	filtered := make([]string, 0, len(bundleEntries))
 	for _, entry := range bundleEntries {
 		if entry != serviceName {
 			filtered = append(filtered, entry)
 		}
 	}
-	content := ""
-	if len(filtered) > 0 {
-		content = strings.Join(filtered, "\n") + "\n"
-	}
-	if err := os.WriteFile(s6BundleContentsPath(), []byte(content), 0644); err != nil {
+	if err := writeLineFile(s6BundleContentsPath(), filtered); err != nil {
 		return err
 	}
 	if err := os.RemoveAll(s6GroupOrchestrdSourceDir(group)); err != nil {
+		return err
+	}
+	if err := refreshS6OrchestrdDependencies(); err != nil {
 		return err
 	}
 	if err := validateS6Sources(); err != nil {
@@ -130,5 +116,5 @@ func isGroupEnabledWithS6(group string) bool {
 	if err != nil {
 		return false
 	}
-	return containsString(uniqueSortedLines(string(entries)), s6GroupOrchestrdServiceName(group))
+	return containsString(uniqueLinesPreserveOrder(string(entries)), s6GroupOrchestrdServiceName(group))
 }

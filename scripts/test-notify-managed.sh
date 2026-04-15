@@ -15,8 +15,7 @@ cleanup() {
   rm -f "$UNIT_PATH"
   rm -f "/run/dinit.d/generated/${UNIT_NAME}-notifyd" "/etc/dinit.d/${UNIT_NAME}-notifyd"
   rm -f "/run/dinit.d/generated/${UNIT_NAME}-notifyd-log" "/etc/dinit.d/${UNIT_NAME}-notifyd-log"
-  rm -f "/run/dinit.d/generated/${UNIT_NAME}-notifyd.state"
-  rm -f "/run/dinit.d/generated/${UNIT_NAME}-notifyd.notify.sock"
+  rm -rf "/run/servicectl/managed/${UNIT_NAME}-notifyd"
   rm -f "$SHOW_OUTPUT" "$STATUS_OUTPUT" "$LOG_OUTPUT"
 }
 trap cleanup EXIT

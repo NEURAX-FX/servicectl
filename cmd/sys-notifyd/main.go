@@ -462,7 +462,21 @@ func (s *server) openNotifySocket() error {
 	if err != nil {
 		return fmt.Errorf("listen notify socket: %w", err)
 	}
+	if err := s.ensureNotifySocketOwnership(s.cfg.notifyPath); err != nil {
+		conn.Close()
+		return err
+	}
 	s.notifyConn = conn
+	return nil
+}
+
+func (s *server) ensureNotifySocketOwnership(path string) error {
+	if err := os.Chmod(path, 0o660); err != nil {
+		return fmt.Errorf("chmod notify socket: %w", err)
+	}
+	if err := applySocketOwnership(path, s.cfg.socketUser, s.cfg.socketGroup); err != nil {
+		return err
+	}
 	return nil
 }
 

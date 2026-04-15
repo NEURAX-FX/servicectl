@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 )
@@ -227,7 +226,7 @@ func notifySocketPath(unitName string, unit *Unit, socketUnit *SocketUnit) strin
 	if mode == managedDirect {
 		return ""
 	}
-	return filepath.Join(config.DinitGenDir, managedServiceName(unitName, mode)+".notify.sock")
+	return managedNotifySocketPath(unitName, mode)
 }
 
 func managedStateFilePath(unitName string, unit *Unit, socketUnit *SocketUnit) string {

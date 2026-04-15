@@ -471,7 +471,7 @@ func parseGroupConfig(path string) ([]groupDefinition, error) {
 		if strings.TrimSpace(current.Name) == "" {
 			return
 		}
-		current.Units = uniqueSortedStrings(current.Units)
+		current.Units = uniquePreserveOrderStrings(current.Units)
 		current.Targets = uniqueSortedStrings(current.Targets)
 		defs = append(defs, current)
 		current = groupDefinition{}
@@ -576,6 +576,20 @@ func uniqueSortedStrings(values []string) []string {
 		result = append(result, value)
 	}
 	sort.Strings(result)
+	return result
+}
+
+func uniquePreserveOrderStrings(values []string) []string {
+	seen := make(map[string]bool)
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		result = append(result, value)
+	}
 	return result
 }
 

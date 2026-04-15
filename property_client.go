@@ -147,6 +147,24 @@ func queryGroupState(name string) (visionapi.GroupState, bool) {
 	return out, true
 }
 
+func queryAllGroups() ([]visionapi.GroupState, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	resp, err := propertyRequest(ctx, http.MethodGet, "/v1/groups?mode="+url.QueryEscape(config.Mode), nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("group query returned %s", resp.Status)
+	}
+	var out visionapi.GroupsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	return out.Groups, nil
+}
+
 func queryUnitGroups(name string) (visionapi.UnitGroupsResponse, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 	defer cancel()

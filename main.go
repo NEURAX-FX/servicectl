@@ -1051,6 +1051,9 @@ func ensureUserModeReady() error {
 	if strings.TrimSpace(os.Getenv("XDG_RUNTIME_DIR")) == "" {
 		return fmt.Errorf("user mode requires XDG_RUNTIME_DIR to be set in the calling environment")
 	}
+	if err := ensureSystemPlaneReadyForUserActivation(); err != nil {
+		return err
+	}
 	if err := dinitctlCommand("list").Run(); err == nil {
 		syncUserDinitEnvironment()
 		return nil
@@ -1066,6 +1069,36 @@ func ensureUserModeReady() error {
 		time.Sleep(100 * time.Millisecond)
 	}
 	return fmt.Errorf("failed to start dinit user instance")
+}
+
+func userActivationGateReady(metaOK bool, meta sysvisionMetaResponse, systemSockExists bool, eventsSockExists bool) bool {
+	if metaOK {
+		return meta.SystemServicectlEventsConnected
+	}
+	return systemSockExists && eventsSockExists
+}
+
+func ensureSystemPlaneReadyForUserActivation() error {
+	if !userMode() {
+		return nil
+	}
+	meta, ok := queryBusMetaViaSysvision()
+	systemSock := visionapi.SystemServicectlSocketPath()
+	eventsSock := visionapi.SystemServicectlEventsSocketPath()
+	systemSockExists := pathExists(systemSock)
+	eventsSockExists := pathExists(eventsSock)
+	if userActivationGateReady(ok, meta, systemSockExists, eventsSockExists) {
+		return nil
+	}
+	if ok && strings.TrimSpace(meta.SystemServicectlEventsError) != "" {
+		return fmt.Errorf("system plane is not ready for user activation: %s", strings.TrimSpace(meta.SystemServicectlEventsError))
+	}
+	return fmt.Errorf("system plane is not ready for user activation: missing %s or %s", systemSock, eventsSock)
+}
+
+func pathExists(path string) bool {
+	_, err := os.Stat(strings.TrimSpace(path))
+	return err == nil
 }
 
 func ensureMinimalUserBootService() error {
@@ -1302,6 +1335,21 @@ parsedFlags:
 	}
 	if action == "serve-api" {
 		os.Exit(servicectlAPIServer())
+	}
+	if action == "group-start-order" {
+		if len(targets) != 1 {
+			fmt.Println("Usage: servicectl [--user] group-start-order <group>")
+			os.Exit(1)
+		}
+		order, err := resolveGroupStartOrder(strings.TrimSpace(targets[0]))
+		if err != nil {
+			fmt.Println(err)
+			os.Exit(1)
+		}
+		for _, unit := range order {
+			fmt.Println(unit)
+		}
+		os.Exit(0)
 	}
 	logsFollow := false
 	logsLines := ""

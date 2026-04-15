@@ -6,10 +6,11 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PREFIX="${HOME}/.local"
 BINDIR=""
 SYSTEM_MODE=0
+INSTALL_SYSTEM_COPY=0
 
 usage() {
   cat <<'EOF'
-Usage: scripts/install.sh [--prefix DIR] [--bindir DIR] [--system]
+Usage: scripts/install.sh [--prefix DIR] [--bindir DIR] [--system] [--also-system]
 
 Installs:
   - servicectl
@@ -27,6 +28,7 @@ Options:
   --prefix DIR  Install under DIR
   --bindir DIR  Install binaries into DIR
   --system      Shortcut for --prefix /usr/local
+  --also-system Also install a copy into /usr/local/bin
   -h, --help    Show this help
 EOF
 }
@@ -54,6 +56,10 @@ while [[ $# -gt 0 ]]; do
       PREFIX="/usr/local"
       shift
       ;;
+    --also-system)
+      INSTALL_SYSTEM_COPY=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -75,14 +81,31 @@ if [[ "$SYSTEM_MODE" -eq 1 && "$EUID" -ne 0 ]]; then
   exit 1
 fi
 
+if [[ "$INSTALL_SYSTEM_COPY" -eq 1 && "$EUID" -ne 0 ]]; then
+  printf '--also-system installs into /usr/local/bin and requires root\n' >&2
+  exit 1
+fi
+
 printf 'Installing to %s\n' "$BINDIR"
 mkdir -p "$BINDIR"
+
+SYSTEM_BINDIR="/usr/local/bin"
+if [[ "$SYSTEM_MODE" -eq 1 ]]; then
+  INSTALL_SYSTEM_COPY=0
+fi
+if [[ "$INSTALL_SYSTEM_COPY" -eq 1 ]]; then
+  printf 'Installing system copy to %s\n' "$SYSTEM_BINDIR"
+  mkdir -p "$SYSTEM_BINDIR"
+fi
 
 build_and_install() {
   local output_name="$1"
   local package_path="$2"
   printf 'Building %s\n' "$output_name"
   go build -o "$BINDIR/$output_name" "$package_path"
+  if [[ "$INSTALL_SYSTEM_COPY" -eq 1 ]]; then
+    install -m 0755 "$BINDIR/$output_name" "$SYSTEM_BINDIR/$output_name"
+  fi
 }
 
 build_and_install servicectl "$ROOT"
@@ -99,6 +122,14 @@ printf '  %s\n' "$BINDIR/sys-logd"
 printf '  %s\n' "$BINDIR/sys-propertyd"
 printf '  %s\n' "$BINDIR/sysvisiond"
 printf '  %s\n' "$BINDIR/sys-orchestrd"
+if [[ "$INSTALL_SYSTEM_COPY" -eq 1 ]]; then
+  printf '  %s\n' "$SYSTEM_BINDIR/servicectl"
+  printf '  %s\n' "$SYSTEM_BINDIR/sys-notifyd"
+  printf '  %s\n' "$SYSTEM_BINDIR/sys-logd"
+  printf '  %s\n' "$SYSTEM_BINDIR/sys-propertyd"
+  printf '  %s\n' "$SYSTEM_BINDIR/sysvisiond"
+  printf '  %s\n' "$SYSTEM_BINDIR/sys-orchestrd"
+fi
 
 case ":$PATH:" in
   *":$BINDIR:"*)
