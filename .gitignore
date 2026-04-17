@@ -9,5 +9,6 @@
 /test-envd
 /sys-propertyd
 /docs/
+.worktrees/
 *.bak
 *.zip
