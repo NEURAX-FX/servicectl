@@ -35,13 +35,16 @@ func (d *daemon) initialGroupSync() error {
 		d.publishState("waiting", "group-disabled")
 		return nil
 	}
+	d.clearFuse("group-enabled")
 	d.writeState("starting", "group-enabled")
 	d.publishState("starting", "group-enabled")
-	ordered := d.startOrderForGroupUnits(d.groupUnits)
-	if err := d.runGroupAction("start", ordered); err != nil {
-		d.writeState("failed", "group-start-error")
-		d.publishState("failed", "group-start-error")
-		return err
+	ordered, orderErr := d.startOrderForGroupUnits(d.groupUnits)
+	if orderErr != nil {
+		d.recordAttemptFailure(orderErr)
+		return nil
+	}
+	if !d.attemptStartWithRetry("group-enabled", func() *operationError { return d.runGroupAction("start", ordered) }) {
+		return nil
 	}
 	d.writeState("running", "group-enabled")
 	d.publishState("running", "group-enabled")
@@ -69,13 +72,16 @@ func (d *daemon) handleGroupScopedChange(event visionapi.EventEnvelope) error {
 		}
 		enabled := strings.EqualFold(strings.TrimSpace(event.Payload["enabled"]), "yes") || strings.TrimSpace(event.Payload["enabled"]) == "1"
 		if enabled {
+			d.clearFuse("group-change-enabled")
 			d.writeState("starting", "group-enabled:"+group)
 			d.publishState("starting", "group-enabled:"+group)
-			ordered := d.startOrderForGroupUnits(d.groupUnits)
-			if err := d.runGroupAction("start", ordered); err != nil {
-				d.writeState("failed", "group-start-error:"+group)
-				d.publishState("failed", "group-start-error:"+group)
-				return err
+			ordered, orderErr := d.startOrderForGroupUnits(d.groupUnits)
+			if orderErr != nil {
+				d.recordAttemptFailure(orderErr)
+				return nil
+			}
+			if !d.attemptStartWithRetry("group-enabled:"+group, func() *operationError { return d.runGroupAction("start", ordered) }) {
+				return nil
 			}
 			d.writeState("running", "group-enabled:"+group)
 			d.publishState("running", "group-enabled:"+group)
@@ -84,8 +90,10 @@ func (d *daemon) handleGroupScopedChange(event visionapi.EventEnvelope) error {
 		d.writeState("stopping", "group-disabled:"+group)
 		d.publishState("stopping", "group-disabled:"+group)
 		if err := d.runGroupAction("stop", reverseServiceOrder(d.groupUnits)); err != nil {
-			return err
+			d.recordAttemptFailure(err)
+			return nil
 		}
+		d.recordAttemptSuccess("group-disabled:" + group)
 		d.writeState("waiting", "group-disabled:"+group)
 		d.publishState("waiting", "group-disabled:"+group)
 		return nil
@@ -123,7 +131,7 @@ func reverseServiceOrder(units []string) []string {
 	return result
 }
 
-func (d *daemon) startOrderForGroupUnits(fallback []string) []string {
+func (d *daemon) startOrderForGroupUnits(fallback []string) ([]string, *operationError) {
 	bin := os.Getenv("SERVICECTL_BIN")
 	if strings.TrimSpace(bin) == "" {
 		bin = "servicectl"
@@ -137,7 +145,11 @@ func (d *daemon) startOrderForGroupUnits(fallback []string) []string {
 	cmd.Stdout = &out
 	cmd.Stderr = &out
 	if err := cmd.Run(); err != nil {
-		return fallback
+		detail := strings.TrimSpace(out.String())
+		if detail == "" {
+			detail = "group-start-order failed"
+		}
+		return fallback, &operationError{Executor: "servicectl", Action: "group-start-order", Target: d.group, Detail: detail, Err: err, Permanent: isPermanentStartError(detail)}
 	}
 	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
 	result := make([]string, 0, len(lines))
@@ -152,7 +164,7 @@ func (d *daemon) startOrderForGroupUnits(fallback []string) []string {
 		result = append(result, line)
 	}
 	if len(result) == 0 {
-		return fallback
+		return fallback, nil
 	}
-	return result
+	return result, nil
 }
