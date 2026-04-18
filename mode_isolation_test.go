@@ -2,22 +2,196 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
 
-func TestS6PathsForModeAreDistinct(t *testing.T) {
+func TestS6PathsAreUnifiedAcrossModes(t *testing.T) {
 	systemPaths := s6PathsForMode("system")
 	userPaths := s6PathsForMode("user")
 
-	if systemPaths.SourceRoot == userPaths.SourceRoot {
-		t.Fatalf("SourceRoot should differ by mode: %q", systemPaths.SourceRoot)
+	if systemPaths.SourceRoot != "/s6/rc" {
+		t.Fatalf("system source root = %q, want /s6/rc", systemPaths.SourceRoot)
 	}
-	if systemPaths.BundleContents == userPaths.BundleContents {
-		t.Fatalf("BundleContents should differ by mode: %q", systemPaths.BundleContents)
+	if userPaths.SourceRoot != "/s6/rc" {
+		t.Fatalf("user source root = %q, want /s6/rc", userPaths.SourceRoot)
 	}
-	if systemPaths.LiveDir == userPaths.LiveDir {
-		t.Fatalf("LiveDir should differ by mode: %q", systemPaths.LiveDir)
+	if systemPaths.BundleContents != "/s6/rc/servicectl-enabled/contents" {
+		t.Fatalf("unexpected system bundle path: %q", systemPaths.BundleContents)
+	}
+	if userPaths.BundleContents != "/s6/rc/servicectl-enabled/contents" {
+		t.Fatalf("unexpected user bundle path: %q", userPaths.BundleContents)
+	}
+	if systemPaths.LiveDir != "/run/s6/state" {
+		t.Fatalf("unexpected system live dir: %q", systemPaths.LiveDir)
+	}
+	if userPaths.LiveDir != "/run/s6/state" {
+		t.Fatalf("unexpected user live dir: %q", userPaths.LiveDir)
+	}
+	if systemPaths.CompiledDir != "/run/s6/compiled.servicectl" {
+		t.Fatalf("unexpected system compiled dir: %q", systemPaths.CompiledDir)
+	}
+	if userPaths.CompiledDir != "/run/s6/compiled.servicectl" {
+		t.Fatalf("unexpected user compiled dir: %q", userPaths.CompiledDir)
+	}
+	if strings.Contains(userPaths.SourceRoot, "servicectl/s6") {
+		t.Fatalf("user source root should not be runtime-based: %q", userPaths.SourceRoot)
+	}
+}
+
+func TestEnableGroupWithS6WritesUserRunScriptInUnifiedPlane(t *testing.T) {
+	tmp := t.TempDir()
+	prevConfig := config
+	defer func() { config = prevConfig }()
+	config = buildConfig(true)
+	prevPaths := testS6PathsOverride
+	testS6PathsOverride = &s6PlanePaths{
+		SourceRoot:      filepath.Join(tmp, "s6", "rc"),
+		CompiledDir:     filepath.Join(tmp, "run", "s6", "compiled.servicectl"),
+		LiveDir:         filepath.Join(tmp, "run", "s6", "state"),
+		BundleDir:       filepath.Join(tmp, "s6", "rc", s6BundleName()),
+		BundleContents:  filepath.Join(tmp, "s6", "rc", s6BundleName(), "contents"),
+		DefaultContents: filepath.Join(tmp, "s6", "rc", "default", "contents"),
+	}
+	defer func() { testS6PathsOverride = prevPaths }()
+	prevAvailable := s6AvailableFunc
+	prevCommandOutput := commandOutputFunc
+	s6AvailableFunc = func() bool { return true }
+	commandOutputFunc = func(name string, args ...string) (string, int, error) { return "", 0, nil }
+	defer func() {
+		s6AvailableFunc = prevAvailable
+		commandOutputFunc = prevCommandOutput
+	}()
+
+	if err := enableGroupWithS6("pipewire"); err != nil {
+		t.Fatalf("enableGroupWithS6 returned error: %v", err)
+	}
+
+	runScript, err := os.ReadFile(filepath.Join(tmp, "s6", "rc", "group-pipewire-orchestrd", "run"))
+	if err != nil {
+		t.Fatalf("read run script: %v", err)
+	}
+	if !strings.Contains(string(runScript), "--user --group pipewire") {
+		t.Fatalf("expected unified plane user run script, got %q", string(runScript))
+	}
+	contents, err := os.ReadFile(filepath.Join(tmp, "s6", "rc", "servicectl-enabled", "contents"))
+	if err != nil {
+		t.Fatalf("read bundle contents: %v", err)
+	}
+	if !strings.Contains(string(contents), "group-pipewire-orchestrd") {
+		t.Fatalf("expected group service in unified bundle, got %q", string(contents))
+	}
+}
+
+func TestIsGroupEnabledWithS6UsesUnifiedBundleInUserMode(t *testing.T) {
+	tmp := t.TempDir()
+	prevConfig := config
+	prevPaths := testS6PathsOverride
+	defer func() {
+		config = prevConfig
+		testS6PathsOverride = prevPaths
+	}()
+	config = buildConfig(true)
+	testS6PathsOverride = &s6PlanePaths{
+		SourceRoot:      filepath.Join(tmp, "s6", "rc"),
+		CompiledDir:     filepath.Join(tmp, "run", "s6", "compiled.servicectl"),
+		LiveDir:         filepath.Join(tmp, "run", "s6", "state"),
+		BundleDir:       filepath.Join(tmp, "s6", "rc", s6BundleName()),
+		BundleContents:  filepath.Join(tmp, "s6", "rc", s6BundleName(), "contents"),
+		DefaultContents: filepath.Join(tmp, "s6", "rc", "default", "contents"),
+	}
+	if err := os.MkdirAll(filepath.Dir(testS6PathsOverride.BundleContents), 0755); err != nil {
+		t.Fatalf("mkdir bundle dir: %v", err)
+	}
+	if err := os.WriteFile(testS6PathsOverride.BundleContents, []byte("group-pipewire-orchestrd\n"), 0644); err != nil {
+		t.Fatalf("write bundle contents: %v", err)
+	}
+
+	if !isGroupEnabledWithS6("pipewire") {
+		t.Fatal("expected unified bundle lookup to report user group enabled")
+	}
+}
+
+func TestIsEnabledWithS6UsesUnifiedBundleInUserMode(t *testing.T) {
+	tmp := t.TempDir()
+	prevConfig := config
+	prevPaths := testS6PathsOverride
+	defer func() {
+		config = prevConfig
+		testS6PathsOverride = prevPaths
+	}()
+	config = buildConfig(true)
+	testS6PathsOverride = &s6PlanePaths{
+		SourceRoot:      filepath.Join(tmp, "s6", "rc"),
+		CompiledDir:     filepath.Join(tmp, "run", "s6", "compiled.servicectl"),
+		LiveDir:         filepath.Join(tmp, "run", "s6", "state"),
+		BundleDir:       filepath.Join(tmp, "s6", "rc", s6BundleName()),
+		BundleContents:  filepath.Join(tmp, "s6", "rc", s6BundleName(), "contents"),
+		DefaultContents: filepath.Join(tmp, "s6", "rc", "default", "contents"),
+	}
+	if err := os.MkdirAll(filepath.Dir(testS6PathsOverride.BundleContents), 0755); err != nil {
+		t.Fatalf("mkdir bundle dir: %v", err)
+	}
+	if err := os.WriteFile(testS6PathsOverride.BundleContents, []byte("cliproxyapi-orchestrd\n"), 0644); err != nil {
+		t.Fatalf("write bundle contents: %v", err)
+	}
+
+	if !isEnabledWithS6("cliproxyapi.service") {
+		t.Fatal("expected unified bundle lookup to report user unit enabled")
+	}
+}
+
+func TestLiveStartS6UsesUnifiedLiveDirInUserMode(t *testing.T) {
+	prevConfig := config
+	prevCommandOutput := commandOutputFunc
+	defer func() {
+		config = prevConfig
+		commandOutputFunc = prevCommandOutput
+	}()
+	config = buildConfig(true)
+	var gotArgs []string
+	commandOutputFunc = func(name string, args ...string) (string, int, error) {
+		gotArgs = append([]string{name}, args...)
+		return "", 0, nil
+	}
+
+	if err := os.MkdirAll("/run/s6/state", 0755); err != nil {
+		t.Fatalf("mkdir live dir: %v", err)
+	}
+	if err := liveStartS6("group-pipewire-orchestrd"); err != nil {
+		t.Fatalf("liveStartS6 returned error: %v", err)
+	}
+	joined := strings.Join(gotArgs, " ")
+	if !strings.Contains(joined, "/run/s6/state") {
+		t.Fatalf("expected unified live dir in command args, got %q", joined)
+	}
+}
+
+func TestLiveUpdateS6UsesUnifiedCompiledDirInUserMode(t *testing.T) {
+	prevConfig := config
+	prevCommandOutput := commandOutputFunc
+	defer func() {
+		config = prevConfig
+		commandOutputFunc = prevCommandOutput
+	}()
+	config = buildConfig(true)
+	var gotArgs []string
+	commandOutputFunc = func(name string, args ...string) (string, int, error) {
+		gotArgs = append([]string{name}, args...)
+		return "", 0, nil
+	}
+
+	if err := os.MkdirAll("/run/s6/state", 0755); err != nil {
+		t.Fatalf("mkdir live dir: %v", err)
+	}
+	if err := liveUpdateS6(); err != nil {
+		t.Fatalf("liveUpdateS6 returned error: %v", err)
+	}
+	joined := strings.Join(gotArgs, " ")
+	if !strings.Contains(joined, "/run/s6/compiled.servicectl") {
+		t.Fatalf("expected unified compiled dir in command args, got %q", joined)
 	}
 }
 

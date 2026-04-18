@@ -17,20 +17,13 @@ type s6PlanePaths struct {
 	DefaultContents string
 }
 
+var testS6PathsOverride *s6PlanePaths
+var commandOutputFunc = commandOutput
+var s6AvailableFunc = s6Available
+
 func s6PathsForMode(mode string) s6PlanePaths {
-	cleanMode := strings.TrimSpace(strings.ToLower(mode))
-	if cleanMode == "user" {
-		base := filepath.Join(runtimeDir(), "servicectl", "s6")
-		sourceRoot := filepath.Join(base, "rc")
-		bundleDir := filepath.Join(sourceRoot, s6BundleName())
-		return s6PlanePaths{
-			SourceRoot:      sourceRoot,
-			CompiledDir:     filepath.Join(base, "compiled.servicectl"),
-			LiveDir:         filepath.Join(base, "state"),
-			BundleDir:       bundleDir,
-			BundleContents:  filepath.Join(bundleDir, "contents"),
-			DefaultContents: filepath.Join(sourceRoot, "default", "contents"),
-		}
+	if testS6PathsOverride != nil {
+		return *testS6PathsOverride
 	}
 	sourceRoot := "/s6/rc"
 	bundleDir := filepath.Join(sourceRoot, s6BundleName())
@@ -131,9 +124,6 @@ func s6Available() bool {
 		if _, err := os.Stat(path); err != nil {
 			return false
 		}
-	}
-	if userMode() {
-		return true
 	}
 	info, err := os.Stat(s6SourceRoot())
 	return err == nil && info.IsDir()
@@ -239,7 +229,7 @@ func ensureSysPropertydSource() error {
 }
 
 func enableWithS6(unitName string) error {
-	if !s6Available() {
+	if !s6AvailableFunc() {
 		return fmt.Errorf("s6 backend is not available")
 	}
 	if err := ensureS6Bundle(); err != nil {
@@ -295,7 +285,7 @@ func enableWithS6(unitName string) error {
 }
 
 func disableWithS6(unitName string) error {
-	if !s6Available() {
+	if !s6AvailableFunc() {
 		return fmt.Errorf("s6 backend is not available")
 	}
 	serviceName := s6OrchestrdServiceName(unitName)
@@ -445,7 +435,7 @@ func validateS6Sources() error {
 	if err := os.MkdirAll(filepath.Dir(compiled), 0755); err != nil {
 		return err
 	}
-	text, code, err := commandOutput("/bin/s6-rc-compile", compiled, s6SourceRoot())
+	text, code, err := commandOutputFunc("/bin/s6-rc-compile", compiled, s6SourceRoot())
 	if err == nil && code == 0 {
 		return nil
 	}
@@ -456,7 +446,7 @@ func liveUpdateS6() error {
 	if _, err := os.Stat(s6LiveDir()); err != nil {
 		return err
 	}
-	text, code, err := commandOutput("/bin/s6-rc-update", "-l", s6LiveDir(), s6CompiledValidateDir())
+	text, code, err := commandOutputFunc("/bin/s6-rc-update", "-l", s6LiveDir(), s6CompiledValidateDir())
 	if err == nil && code == 0 {
 		return nil
 	}
@@ -467,7 +457,7 @@ func liveStartS6(service string) error {
 	if _, err := os.Stat(s6LiveDir()); err != nil {
 		return err
 	}
-	text, code, err := commandOutput("/bin/s6-rc", "-l", s6LiveDir(), "-u", "change", service)
+	text, code, err := commandOutputFunc("/bin/s6-rc", "-l", s6LiveDir(), "-u", "change", service)
 	if err == nil && code == 0 {
 		return nil
 	}
@@ -478,7 +468,7 @@ func liveStopS6(service string) error {
 	if _, err := os.Stat(s6LiveDir()); err != nil {
 		return err
 	}
-	text, code, err := commandOutput("/bin/s6-rc", "-l", s6LiveDir(), "-d", "change", service)
+	text, code, err := commandOutputFunc("/bin/s6-rc", "-l", s6LiveDir(), "-d", "change", service)
 	if err == nil && code == 0 {
 		return nil
 	}

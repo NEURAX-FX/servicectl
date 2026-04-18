@@ -25,7 +25,7 @@ func s6GroupOrchestrdSourceDir(group string) string {
 }
 
 func enableGroupWithS6(group string) error {
-	if !s6Available() {
+	if !s6AvailableFunc() {
 		return fmt.Errorf("s6 backend is not available")
 	}
 	if err := ensureS6Bundle(); err != nil {
@@ -74,7 +74,7 @@ func enableGroupWithS6(group string) error {
 }
 
 func disableGroupWithS6(group string) error {
-	if !s6Available() {
+	if !s6AvailableFunc() {
 		return fmt.Errorf("s6 backend is not available")
 	}
 	serviceName := s6GroupOrchestrdServiceName(group)
