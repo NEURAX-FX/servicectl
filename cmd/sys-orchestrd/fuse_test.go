@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"log"
+	"log/syslog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -210,6 +211,28 @@ func TestFuseOpenStillLogsToTerminalAndSyslog(t *testing.T) {
 	if !found {
 		t.Fatalf("expected fuse-open log in syslog, got %#v", sys.err)
 	}
+}
+
+func TestTypedNilSyslogWriterDoesNotPanic(t *testing.T) {
+	var terminal bytes.Buffer
+	var sysw *syslog.Writer
+	d := &daemon{
+		logger:      log.New(&terminal, "", 0),
+		syslogger:   sysw,
+		serviceName: "slurmctld-orchestrd",
+		unit:        "slurmctld.service",
+		maxFailures: 1,
+		stateFile:   filepath.Join(t.TempDir(), "state"),
+	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("expected typed nil syslog writer to be ignored, got panic: %v", r)
+		}
+	}()
+
+	d.recordAttemptFailure(&operationError{Executor: "servicectl", Action: "start", Target: "slurmctld.service", Err: io.EOF})
+	d.recordAttemptSuccess("initial-start")
 }
 
 func readTextFile(t *testing.T, path string) string {

@@ -48,6 +48,24 @@ type syslogSink interface {
 	Err(string) error
 }
 
+func newSyslogSink(priority syslog.Priority, tag string) syslogSink {
+	sysw, err := syslog.New(priority, tag)
+	if err != nil || sysw == nil {
+		return nil
+	}
+	return sysw
+}
+
+func usableSyslogSink(sink syslogSink) syslogSink {
+	if sink == nil {
+		return nil
+	}
+	if writer, ok := sink.(*syslog.Writer); ok && writer == nil {
+		return nil
+	}
+	return sink
+}
+
 type operationError struct {
 	Executor  string
 	Action    string
@@ -104,10 +122,10 @@ func main() {
 	}
 	serviceName := orchestrdServiceName(strings.TrimSpace(*unit), strings.TrimSpace(*group))
 	logger = log.New(os.Stdout, "sys-orchestrd["+serviceName+"]: ", log.LstdFlags)
-	sysw, _ := syslog.New(syslog.LOG_INFO|syslog.LOG_DAEMON, "servicectl["+serviceName+"]")
+	sysw := newSyslogSink(syslog.LOG_INFO|syslog.LOG_DAEMON, "servicectl["+serviceName+"]")
 	d := &daemon{unit: strings.TrimSpace(*unit), group: strings.TrimSpace(*group), userMode: *userMode, runtime: runtime, logger: logger, syslogger: sysw, state: "waiting", stateFile: orchestrdStateFile(stateName, *userMode, runtime), serviceName: serviceName, maxFailures: maxFailureThreshold(), groups: map[string]bool{}, debug: newStartupDebugger()}
-	if d.syslogger != nil {
-		if closer, ok := d.syslogger.(interface{ Close() error }); ok {
+	if sink := usableSyslogSink(d.syslogger); sink != nil {
+		if closer, ok := sink.(interface{ Close() error }); ok {
 			defer closer.Close()
 		}
 	}
@@ -525,14 +543,14 @@ func (d *daemon) logInfo(format string, args ...any) {
 	if d.logger != nil {
 		d.logger.Print(msg)
 	}
-	if d.syslogger != nil {
-		_ = d.syslogger.Info(msg)
+	if sink := usableSyslogSink(d.syslogger); sink != nil {
+		_ = sink.Info(msg)
 	}
 }
 
 func (d *daemon) logInfoSyslogOnly(format string, args ...any) {
-	if d.syslogger != nil {
-		_ = d.syslogger.Info(fmt.Sprintf(format, args...))
+	if sink := usableSyslogSink(d.syslogger); sink != nil {
+		_ = sink.Info(fmt.Sprintf(format, args...))
 	}
 }
 
@@ -540,8 +558,8 @@ func (d *daemon) logError(format string, args ...any) {
 	if d.logger != nil {
 		d.logger.Printf(format, args...)
 	}
-	if d.syslogger != nil {
-		_ = d.syslogger.Err(fmt.Sprintf(format, args...))
+	if sink := usableSyslogSink(d.syslogger); sink != nil {
+		_ = sink.Err(fmt.Sprintf(format, args...))
 	}
 }
 
