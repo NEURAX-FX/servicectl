@@ -83,17 +83,24 @@ func resolveGroupSelector(raw string) (groupActionTarget, error) {
 	return groupActionTarget{group: resp.Groups[0].Name, via: "unit", original: raw}, nil
 }
 
-func shouldAutoResolveGroupAction(action string) bool {
+func shouldAutoResolveGroupAction(action string, raw string) bool {
 	switch strings.TrimSpace(action) {
 	case "enable", "disable", "is-enabled":
-		return true
+		selector := strings.TrimSpace(raw)
+		if selector == "" {
+			return false
+		}
+		if _, ok := parseVirtualTarget(selector); ok {
+			return true
+		}
+		return strings.HasSuffix(selector, ".target")
 	default:
 		return false
 	}
 }
 
 func maybeResolveGroupActionTarget(action string, raw string) (groupActionTarget, bool, error) {
-	if !shouldAutoResolveGroupAction(action) {
+	if !shouldAutoResolveGroupAction(action, raw) {
 		return groupActionTarget{}, false, nil
 	}
 	if _, ok := parseVirtualTarget(raw); ok {
