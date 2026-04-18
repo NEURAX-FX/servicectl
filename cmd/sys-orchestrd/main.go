@@ -33,7 +33,7 @@ type daemon struct {
 	stateFile  string
 	serviceName string
 	logger     *log.Logger
-	syslogger  *syslog.Writer
+	syslogger  syslogSink
 	maxFailures int
 	failureCount int
 	fused     bool
@@ -41,6 +41,11 @@ type daemon struct {
 	groups     map[string]bool
 	groupUnits []string
 	debug      *startupDebugger
+}
+
+type syslogSink interface {
+	Info(string) error
+	Err(string) error
 }
 
 type operationError struct {
@@ -102,7 +107,9 @@ func main() {
 	sysw, _ := syslog.New(syslog.LOG_INFO|syslog.LOG_DAEMON, "servicectl["+serviceName+"]")
 	d := &daemon{unit: strings.TrimSpace(*unit), group: strings.TrimSpace(*group), userMode: *userMode, runtime: runtime, logger: logger, syslogger: sysw, state: "waiting", stateFile: orchestrdStateFile(stateName, *userMode, runtime), serviceName: serviceName, maxFailures: maxFailureThreshold(), groups: map[string]bool{}, debug: newStartupDebugger()}
 	if d.syslogger != nil {
-		defer d.syslogger.Close()
+		if closer, ok := d.syslogger.(interface{ Close() error }); ok {
+			defer closer.Close()
+		}
 	}
 	if err := d.run(); err != nil {
 		d.logError("fatal err=%v", err)
@@ -514,9 +521,16 @@ func isPermanentStartError(msg string) bool {
 }
 
 func (d *daemon) logInfo(format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
 	if d.logger != nil {
-		d.logger.Printf(format, args...)
+		d.logger.Print(msg)
 	}
+	if d.syslogger != nil {
+		_ = d.syslogger.Info(msg)
+	}
+}
+
+func (d *daemon) logInfoSyslogOnly(format string, args ...any) {
 	if d.syslogger != nil {
 		_ = d.syslogger.Info(fmt.Sprintf(format, args...))
 	}
@@ -537,7 +551,7 @@ func (d *daemon) recordAttemptSuccess(reason string) {
 		d.fused = false
 		d.fuseReason = ""
 	}
-	d.logInfo("attempt succeeded service=%s object=%s reason=%s", d.serviceName, d.objectName(), reason)
+	d.logInfoSyslogOnly("attempt succeeded service=%s object=%s reason=%s", d.serviceName, d.objectName(), reason)
 }
 
 func (d *daemon) recordAttemptFailure(err *operationError) {
@@ -565,7 +579,7 @@ func (d *daemon) clearFuse(trigger string) {
 	d.fused = false
 	d.fuseReason = ""
 	d.failureCount = 0
-	d.logInfo("circuit fuse cleared service=%s object=%s trigger=%s", d.serviceName, d.objectName(), trigger)
+	d.logInfoSyslogOnly("circuit fuse cleared service=%s object=%s trigger=%s", d.serviceName, d.objectName(), trigger)
 	d.writeState("waiting", "fuse-cleared:"+trigger)
 	d.publishState("waiting", "fuse-cleared:"+trigger)
 }

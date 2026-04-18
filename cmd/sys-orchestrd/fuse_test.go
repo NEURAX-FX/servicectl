@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"io"
 	"log"
 	"os"
@@ -8,6 +9,21 @@ import (
 	"strings"
 	"testing"
 )
+
+type fakeSyslog struct {
+	info []string
+	err  []string
+}
+
+func (f *fakeSyslog) Info(msg string) error {
+	f.info = append(f.info, msg)
+	return nil
+}
+
+func (f *fakeSyslog) Err(msg string) error {
+	f.err = append(f.err, msg)
+	return nil
+}
 
 func TestRecordAttemptFailureFusesAfterThreshold(t *testing.T) {
 	tmp := t.TempDir()
@@ -93,6 +109,106 @@ func TestPermanentStartErrorClassification(t *testing.T) {
 	}
 	if isPermanentStartError("dial unix /run/servicectl/sysvisiond.sock: connect: no such file or directory") {
 		t.Fatalf("expected transient dial failure to be non-permanent")
+	}
+}
+
+func TestRecordAttemptSuccessLogsOnlyToSyslog(t *testing.T) {
+	var terminal bytes.Buffer
+	sys := &fakeSyslog{}
+	d := &daemon{
+		logger:      log.New(&terminal, "", 0),
+		syslogger:   sys,
+		serviceName: "slurmctld-orchestrd",
+		unit:        "slurmctld.service",
+		maxFailures: 3,
+		failureCount: 2,
+		fused:       true,
+		fuseReason:  "previous error",
+	}
+
+	d.recordAttemptSuccess("initial-start")
+
+	if strings.Contains(terminal.String(), "attempt succeeded") {
+		t.Fatalf("expected attempt success log to stay off terminal, got %q", terminal.String())
+	}
+	if len(sys.info) != 1 || !strings.Contains(sys.info[0], "attempt succeeded") {
+		t.Fatalf("expected attempt success log in syslog, got %#v", sys.info)
+	}
+}
+
+func TestClearFuseLogsOnlyToSyslog(t *testing.T) {
+	var terminal bytes.Buffer
+	sys := &fakeSyslog{}
+	d := &daemon{
+		logger:       log.New(&terminal, "", 0),
+		syslogger:    sys,
+		serviceName:  "slurmctld-orchestrd",
+		unit:         "slurmctld.service",
+		maxFailures:  3,
+		failureCount: 3,
+		fused:        true,
+		fuseReason:   "start failed",
+		stateFile:    filepath.Join(t.TempDir(), "state"),
+	}
+
+	d.clearFuse("group-change-enabled")
+
+	if strings.Contains(terminal.String(), "circuit fuse cleared") {
+		t.Fatalf("expected fuse clear log to stay off terminal, got %q", terminal.String())
+	}
+	if len(sys.info) == 0 || !strings.Contains(sys.info[0], "circuit fuse cleared") {
+		t.Fatalf("expected fuse clear log in syslog, got %#v", sys.info)
+	}
+}
+
+func TestRecordAttemptFailureStillLogsToTerminalAndSyslog(t *testing.T) {
+	var terminal bytes.Buffer
+	sys := &fakeSyslog{}
+	d := &daemon{
+		logger:      log.New(&terminal, "", 0),
+		syslogger:   sys,
+		serviceName: "slurmctld-orchestrd",
+		unit:        "slurmctld.service",
+		maxFailures: 3,
+		stateFile:   filepath.Join(t.TempDir(), "state"),
+	}
+
+	d.recordAttemptFailure(&operationError{Executor: "servicectl", Action: "start", Target: "slurmctld.service", Err: io.EOF})
+
+	if !strings.Contains(terminal.String(), "attempt failed") {
+		t.Fatalf("expected failure log on terminal, got %q", terminal.String())
+	}
+	if len(sys.err) == 0 || !strings.Contains(sys.err[0], "attempt failed") {
+		t.Fatalf("expected failure log in syslog, got %#v", sys.err)
+	}
+}
+
+func TestFuseOpenStillLogsToTerminalAndSyslog(t *testing.T) {
+	var terminal bytes.Buffer
+	sys := &fakeSyslog{}
+	d := &daemon{
+		logger:      log.New(&terminal, "", 0),
+		syslogger:   sys,
+		serviceName: "slurmctld-orchestrd",
+		unit:        "slurmctld.service",
+		maxFailures: 1,
+		stateFile:   filepath.Join(t.TempDir(), "state"),
+	}
+
+	d.recordAttemptFailure(&operationError{Executor: "servicectl", Action: "start", Target: "slurmctld.service", Err: io.EOF})
+
+	if !strings.Contains(terminal.String(), "circuit fuse open") {
+		t.Fatalf("expected fuse-open log on terminal, got %q", terminal.String())
+	}
+	found := false
+	for _, msg := range sys.err {
+		if strings.Contains(msg, "circuit fuse open") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected fuse-open log in syslog, got %#v", sys.err)
 	}
 }
 
