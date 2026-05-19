@@ -135,6 +135,8 @@ bash ./scripts/test-s6-orchestrd.sh
 
 `scripts/test-s6-live.sh` is for manual live s6 validation and is intentionally not part of `test-all.sh`.
 
+`scripts/test-test-all.sh` is a meta-test that validates `test-all.sh` itself using a fake `go` binary; it is intentionally not part of `test-all.sh`.
+
 ## Runtime Paths
 
 System mode:

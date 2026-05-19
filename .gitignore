@@ -10,5 +10,6 @@
 /sys-propertyd
 /docs/
 .worktrees/
+.lcm/
 *.bak
 *.zip

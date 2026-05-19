@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"servicectl/internal/util"
 	"servicectl/internal/visionapi"
 )
 
@@ -138,7 +139,7 @@ func (d *daemon) handleReload(w http.ResponseWriter, r *http.Request) {
 	mode, err := requestMode(r)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
-		writeJSON(w, map[string]string{"error": err.Error()})
+		util.WriteJSON(w, map[string]string{"error": err.Error()})
 		return
 	}
 	d.mu.Lock()
@@ -146,10 +147,10 @@ func (d *daemon) handleReload(w http.ResponseWriter, r *http.Request) {
 	d.mu.Unlock()
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
-		writeJSON(w, map[string]string{"error": err.Error()})
+		util.WriteJSON(w, map[string]string{"error": err.Error()})
 		return
 	}
-	writeJSON(w, map[string]string{"result": "ok"})
+	util.WriteJSON(w, map[string]string{"result": "ok"})
 }
 
 func (d *daemon) handleProperties(w http.ResponseWriter, r *http.Request) {
@@ -160,7 +161,7 @@ func (d *daemon) handleProperties(w http.ResponseWriter, r *http.Request) {
 	mode, err := requestMode(r)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
-		writeJSON(w, map[string]string{"error": err.Error()})
+		util.WriteJSON(w, map[string]string{"error": err.Error()})
 		return
 	}
 	d.mu.Lock()
@@ -186,7 +187,7 @@ func (d *daemon) handleProperties(w http.ResponseWriter, r *http.Request) {
 		value, persistent := d.effectiveValueLocked(mode, key)
 		resp.Properties = append(resp.Properties, visionapi.PropertyState{Key: key, Value: value, Persistent: persistent})
 	}
-	writeJSON(w, resp)
+	util.WriteJSON(w, resp)
 }
 
 func (d *daemon) handleGroups(w http.ResponseWriter, r *http.Request) {
@@ -197,7 +198,7 @@ func (d *daemon) handleGroups(w http.ResponseWriter, r *http.Request) {
 	mode, err := requestMode(r)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
-		writeJSON(w, map[string]string{"error": err.Error()})
+		util.WriteJSON(w, map[string]string{"error": err.Error()})
 		return
 	}
 	d.mu.Lock()
@@ -212,7 +213,7 @@ func (d *daemon) handleGroups(w http.ResponseWriter, r *http.Request) {
 	for _, name := range names {
 		resp.Groups = append(resp.Groups, d.groupStateLocked(mode, name))
 	}
-	writeJSON(w, resp)
+	util.WriteJSON(w, resp)
 }
 
 func (d *daemon) handleGroup(w http.ResponseWriter, r *http.Request) {
@@ -223,7 +224,7 @@ func (d *daemon) handleGroup(w http.ResponseWriter, r *http.Request) {
 	mode, err := requestMode(r)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
-		writeJSON(w, map[string]string{"error": err.Error()})
+		util.WriteJSON(w, map[string]string{"error": err.Error()})
 		return
 	}
 	name := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/v1/group/"))
@@ -236,10 +237,10 @@ func (d *daemon) handleGroup(w http.ResponseWriter, r *http.Request) {
 	defs := d.definitionsLocked(mode)
 	if _, ok := defs.Groups[name]; !ok {
 		w.WriteHeader(http.StatusNotFound)
-		writeJSON(w, map[string]string{"error": "group not found"})
+		util.WriteJSON(w, map[string]string{"error": "group not found"})
 		return
 	}
-	writeJSON(w, d.groupStateLocked(mode, name))
+	util.WriteJSON(w, d.groupStateLocked(mode, name))
 }
 
 func (d *daemon) handleUnitGroups(w http.ResponseWriter, r *http.Request) {
@@ -250,7 +251,7 @@ func (d *daemon) handleUnitGroups(w http.ResponseWriter, r *http.Request) {
 	mode, err := requestMode(r)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
-		writeJSON(w, map[string]string{"error": err.Error()})
+		util.WriteJSON(w, map[string]string{"error": err.Error()})
 		return
 	}
 	unit := normalizeUnitName(strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/v1/unit-groups/")))
@@ -268,7 +269,7 @@ func (d *daemon) handleUnitGroups(w http.ResponseWriter, r *http.Request) {
 			resp.Groups = append(resp.Groups, group)
 		}
 	}
-	writeJSON(w, resp)
+	util.WriteJSON(w, resp)
 }
 
 func (d *daemon) handleResolveTarget(w http.ResponseWriter, r *http.Request) {
@@ -279,7 +280,7 @@ func (d *daemon) handleResolveTarget(w http.ResponseWriter, r *http.Request) {
 	mode, err := requestMode(r)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
-		writeJSON(w, map[string]string{"error": err.Error()})
+		util.WriteJSON(w, map[string]string{"error": err.Error()})
 		return
 	}
 	input := strings.TrimSpace(r.URL.Query().Get("name"))
@@ -288,10 +289,10 @@ func (d *daemon) handleResolveTarget(w http.ResponseWriter, r *http.Request) {
 	group, ok := d.resolveVirtualLocked(mode, input)
 	if !ok {
 		w.WriteHeader(http.StatusNotFound)
-		writeJSON(w, map[string]string{"error": "target/group not found"})
+		util.WriteJSON(w, map[string]string{"error": "target/group not found"})
 		return
 	}
-	writeJSON(w, resolveTargetResponse{Input: input, Group: group, Target: input})
+	util.WriteJSON(w, resolveTargetResponse{Input: input, Group: group, Target: input})
 }
 
 func (d *daemon) handlePropertyUpdate(w http.ResponseWriter, r *http.Request) {
@@ -302,15 +303,15 @@ func (d *daemon) handlePropertyUpdate(w http.ResponseWriter, r *http.Request) {
 	var req propertyUpdateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
-		writeJSON(w, map[string]string{"error": err.Error()})
+		util.WriteJSON(w, map[string]string{"error": err.Error()})
 		return
 	}
 	if err := d.setProperty(strings.TrimSpace(req.Key), strings.TrimSpace(req.Value), req.Persistent, strings.TrimSpace(req.Mode)); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
-		writeJSON(w, map[string]string{"error": err.Error()})
+		util.WriteJSON(w, map[string]string{"error": err.Error()})
 		return
 	}
-	writeJSON(w, map[string]string{"result": "ok"})
+	util.WriteJSON(w, map[string]string{"result": "ok"})
 }
 
 func (d *daemon) setProperty(key string, value string, persistent bool, mode string) error {
@@ -627,27 +628,15 @@ func (d *daemon) groupStateLocked(mode string, name string) visionapi.GroupState
 	return visionapi.GroupState{
 		Name:       name,
 		Units:      append([]string{}, def.Units...),
-		Enabled:    externalManagedValueEnabled(value),
+		Enabled:    util.ExternalManagedValueEnabled(value),
 		Persistent: persistent,
 		Targets:    append([]string{}, def.Targets...),
 		UpdatedAt:  time.Now().UTC().Format(time.RFC3339Nano),
 	}
 }
 
-func externalManagedValueEnabled(value string) bool {
-	value = strings.TrimSpace(strings.ToLower(value))
-	return value == "1" || value == "true" || value == "yes" || value == "on"
-}
-
-func yesNo(value bool) string {
-	if value {
-		return "yes"
-	}
-	return "no"
-}
-
 func (d *daemon) publishPropertyChangeLocked(key string, value string, persistent bool, mode string) {
-	payload := map[string]string{"key": key, "value": value, "persistent": yesNo(persistent)}
+	payload := map[string]string{"key": key, "value": value, "persistent": util.YesNo(persistent)}
 	if !persistent {
 		d.publishModeLocked(mode, visionapi.KindPropertyChanged, payload)
 	} else {
@@ -655,12 +644,12 @@ func (d *daemon) publishPropertyChangeLocked(key string, value string, persisten
 		d.publishModeLocked(visionapi.ModeUser, visionapi.KindPropertyChanged, payload)
 	}
 	if group := strings.TrimPrefix(key, "persist.group."); group != key {
-		groupPayload := map[string]string{"group": group, "enabled": yesNo(value == "1"), "persistent": "yes"}
+		groupPayload := map[string]string{"group": group, "enabled": util.YesNo(value == "1"), "persistent": "yes"}
 		d.publishModeLocked(visionapi.ModeSystem, visionapi.KindGroupChanged, groupPayload)
 		d.publishModeLocked(visionapi.ModeUser, visionapi.KindGroupChanged, groupPayload)
 	}
 	if group := strings.TrimPrefix(key, "prop.group."); group != key {
-		d.publishModeLocked(mode, visionapi.KindGroupChanged, map[string]string{"group": group, "enabled": yesNo(value == "1"), "persistent": "no"})
+		d.publishModeLocked(mode, visionapi.KindGroupChanged, map[string]string{"group": group, "enabled": util.YesNo(value == "1"), "persistent": "no"})
 	}
 }
 
@@ -744,11 +733,4 @@ func groupContainsUnit(group visionapi.GroupState, unit string) bool {
 		}
 	}
 	return false
-}
-
-func writeJSON(w http.ResponseWriter, value any) {
-	w.Header().Set("Content-Type", "application/json")
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	_ = enc.Encode(value)
 }

@@ -408,7 +408,11 @@ func loadEnvFiles(paths []string) map[string]string {
 			}
 			parts := strings.SplitN(line, "=", 2)
 			if len(parts) == 2 {
-				envs[parts[0]] = strings.Trim(parts[1], `"'\t `)
+				// NOTE: must be a regular string literal so \t is parsed as
+				// a tab. The previous raw-string form (`"'\t `) treated \ and
+				// t as literal cutset characters, which silently stripped a
+				// leading/trailing 't' from values like `true` -> `rue`.
+				envs[parts[0]] = strings.Trim(parts[1], "\"'\t ")
 			}
 		}
 		f.Close()
@@ -460,6 +464,33 @@ func appendCmdExtra(cmd string, extras []string) string {
 	return strings.TrimSpace(cmd)
 }
 
+// dinitQuote escapes a value for use as a single token on a dinit `command =`
+// line. dinit's parser is NOT shell: it only honors backslash escapes and
+// double quotes. Single quotes are NOT special and are passed through verbatim,
+// which is why we previously corrupted env values like
+// `XDG_RUNTIME_DIR='/tmp/runtime-0'` (the literal single quotes ended up in
+// the spawned process's environment, breaking wireplumber's connect path).
+//
+// We backslash-escape every byte that dinit treats specially (whitespace,
+// double quote, backslash, hash) so the resulting token contains exactly the
+// original characters when /usr/bin/env reads it. Empty values are emitted as
+// `""` so the token is non-empty.
+func dinitQuote(s string) string {
+	if s == "" {
+		return `""`
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch r {
+		case '\\', '"', ' ', '\t', '\n', '#':
+			b.WriteByte('\\')
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
 func buildEnvPrefix(envs map[string]string) string {
 	if len(envs) == 0 {
 		return ""
@@ -471,7 +502,15 @@ func buildEnvPrefix(envs map[string]string) string {
 	sort.Strings(keys)
 	envList := make([]string, 0, len(keys))
 	for _, k := range keys {
-		envList = append(envList, fmt.Sprintf("%s=%s", k, envs[k]))
+		// Values are dinit-quoted (NOT shell-quoted). The output is joined
+		// with spaces and prepended to ExecStart via /usr/bin/env. Without
+		// escaping, whitespace inside a value would split the command (e.g.
+		// SERVER__NAME=Image Gen MCP Server made /usr/bin/env treat `Gen` as
+		// the executable). Earlier code wrapped values in single quotes,
+		// which dinit treats as literal characters; the spawned process then
+		// saw values like XDG_RUNTIME_DIR='/tmp/runtime-0' (with literal
+		// quotes), which broke any client that joined the value into a path.
+		envList = append(envList, fmt.Sprintf("%s=%s", k, dinitQuote(envs[k])))
 	}
 	return "/usr/bin/env " + strings.Join(envList, " ") + " "
 }

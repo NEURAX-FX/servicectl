@@ -5,19 +5,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"servicectl/internal/util"
 )
 
-func sanitizeS6Name(value string) string {
-	replacer := strings.NewReplacer("/", "-", ".", "-", ":", "-", " ", "-")
-	clean := strings.Trim(replacer.Replace(strings.TrimSpace(value)), "-")
-	if clean == "" {
-		return "group"
-	}
-	return clean
-}
-
 func s6GroupOrchestrdServiceName(group string) string {
-	return "group-" + sanitizeS6Name(group) + "-orchestrd"
+	return "group-" + util.SanitizeS6Name(group, "group") + "-orchestrd"
 }
 
 func s6GroupOrchestrdSourceDir(group string) string {

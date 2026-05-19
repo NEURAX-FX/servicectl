@@ -5,6 +5,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"servicectl/internal/util"
 )
 
 type ansiStyle string
@@ -243,19 +245,10 @@ func managedStateFilePath(unitName string, unit *Unit, socketUnit *SocketUnit) s
 func printEnvironmentSection(unit *Unit) {
 	if userMode() {
 		env := userSessionEnvDefaults()
-		printSection("Environment", [][2]string{{"Env HOME", env["HOME"]}, {"Env XDG RT", env["XDG_RUNTIME_DIR"]}, {"Env XDG CFG", env["XDG_CONFIG_HOME"]}, {"Env XDG ST", env["XDG_STATE_HOME"]}, {"Env XDG CA", env["XDG_CACHE_HOME"]}, {"Env DBUS", firstNonEmpty(env["DBUS_SESSION_BUS_ADDRESS"], "-")}})
+		printSection("Environment", [][2]string{{"Env HOME", env["HOME"]}, {"Env XDG RT", env["XDG_RUNTIME_DIR"]}, {"Env XDG CFG", env["XDG_CONFIG_HOME"]}, {"Env XDG ST", env["XDG_STATE_HOME"]}, {"Env XDG CA", env["XDG_CACHE_HOME"]}, {"Env DBUS", util.FirstNonEmpty(env["DBUS_SESSION_BUS_ADDRESS"], "-")}})
 		printUserEnvDiagnostics()
 		return
 	}
-	printSection("Environment", [][2]string{{"Manager Scope", "system"}, {"HOME", firstNonEmpty(os.Getenv("HOME"), "-")}, {"PATH", firstNonEmpty(os.Getenv("PATH"), "-")}})
+	printSection("Environment", [][2]string{{"Manager Scope", "system"}, {"HOME", util.FirstNonEmpty(os.Getenv("HOME"), "-")}, {"PATH", util.FirstNonEmpty(os.Getenv("PATH"), "-")}})
 	_ = unit
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return value
-		}
-	}
-	return ""
 }

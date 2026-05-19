@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"servicectl/internal/util"
 )
 
 func TestEffectiveEnabledFromFlags(t *testing.T) {
@@ -67,8 +69,8 @@ func TestExternalManagedValueEnabled(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := externalManagedValueEnabled(tt.value); got != tt.want {
-				t.Fatalf("externalManagedValueEnabled(%q) = %v, want %v", tt.value, got, tt.want)
+			if got := util.ExternalManagedValueEnabled(tt.value); got != tt.want {
+				t.Fatalf("util.ExternalManagedValueEnabled(%q) = %v, want %v", tt.value, got, tt.want)
 			}
 		})
 	}

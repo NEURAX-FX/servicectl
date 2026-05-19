@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"servicectl/internal/util"
 	"servicectl/internal/visionapi"
 )
 
@@ -790,7 +791,7 @@ func showUnit(unitName string) int {
 	stopCmd := compileExecStop(unit, allEnvs)
 
 	fmt.Printf("%s %s\n\n", colorize("servicectl show", styleBold, styleCyan), colorize(unitName+".service", styleBold))
-	printSection("Unit", [][2]string{{"Name", unitName + ".service"}, {"Mode", config.Mode}, {"Description", unit.Description}, {"Source", unit.SourcePath}, {"Managed By", managedBy}, {"Activation Model", string(managementMode)}, {"Dinit", dinitName}, {"Logger", loggerName}, {"Log Tag", journalIdentifier(unitName)}})
+	printSection("Unit", [][2]string{{"Name", unitName + ".service"}, {"Mode", config.Mode}, {"Description", unit.Description}, {"Source", unit.SourcePath}, {"Managed By", managedBy}, {"Activation Model", string(managementMode)}, {"Dinit", dinitName}, {"Logger", loggerName}, {"Log Tag", util.JournalIdentifier(unitName)}})
 	mainPID := ""
 	managerRuntimePID := ""
 	if runtimeState != nil {
@@ -840,7 +841,7 @@ func showUnitFromSnapshot(unitName string, snapshot visionapi.UnitSnapshot) int 
 
 	fmt.Printf("%s %s\n\n", colorize("servicectl show", styleBold, styleCyan), colorize(unitName+".service", styleBold))
 	managementMode := managedServiceModeForUnit(unit, socketUnit)
-	printSection("Unit", [][2]string{{"Name", unitName + ".service"}, {"Mode", config.Mode}, {"Description", unit.Description}, {"Source", unit.SourcePath}, {"Managed By", snapshot.ManagedBy}, {"Activation Model", string(managementMode)}, {"Dinit", snapshot.DinitName}, {"Logger", snapshot.LoggerName}, {"Log Tag", journalIdentifier(unitName)}})
+	printSection("Unit", [][2]string{{"Name", unitName + ".service"}, {"Mode", config.Mode}, {"Description", unit.Description}, {"Source", unit.SourcePath}, {"Managed By", snapshot.ManagedBy}, {"Activation Model", string(managementMode)}, {"Dinit", snapshot.DinitName}, {"Logger", snapshot.LoggerName}, {"Log Tag", util.JournalIdentifier(unitName)}})
 	printSection("Runtime", [][2]string{{"State", emptyDash(snapshot.State)}, {"Activation", emptyDash(snapshot.Activation)}, {"Process ID", emptyDash(snapshot.ProcessID)}, {"Manager PID", emptyDash(snapshot.ManagerPID)}, {"Main PID", emptyDash(snapshot.MainPID)}, {"Phase", emptyDash(snapshot.Phase)}, {"Child", emptyDash(snapshot.ChildState)}, {"Status", emptyDash(snapshot.Status)}, {"Failure", emptyDash(snapshot.Failure)}, {"Notify Sock", emptyDash(snapshot.NotifySocket)}, {"State File", emptyDash(snapshot.StateFile)}})
 	printSection("Orchestration", [][2]string{{"Enabled", enabledState}, {"Management", management}, {"Orchestrator", orchName}, {"Orchestrator Scope", config.Mode}, {"Orchestrator State", emptyDash(mapValue(orchState, "state"))}, {"Orchestrator PID", emptyDash(orchPID)}, {"Orchestrator State File", orchestratorStateFilePath(unitName)}, {"Last Orchestration Event", emptyDash(mapValue(orchState, "state"))}, {"Last Orchestration Reason", emptyDash(mapValue(orchState, "reason"))}})
 	printSection("S6", [][2]string{{"S6 Service", orchName}, {"S6 Bundle", s6BundleName()}, {"S6 Source Root", s6SourceRoot()}, {"S6 Source Dir", s6OrchestrdSourceDir(unitName)}, {"In Default Bundle", boolWord(s6ContentsContain(s6DefaultContentsPath(), s6BundleName()) && s6ContentsContain(s6DefaultContentsPath(), s6SysvisiondServiceName()) && s6ContentsContain(s6DefaultContentsPath(), s6ServicectlAPIServiceName()))}, {"In Enable Bundle", boolWord(s6ContentsContain(s6BundleContentsPath(), orchName))}})
@@ -1054,6 +1055,25 @@ func ensureUserModeReady() error {
 	if err := ensureSystemPlaneReadyForUserActivation(); err != nil {
 		return err
 	}
+	// Serialize concurrent invocations of `servicectl --user ...` so that the
+	// check-then-spawn dance below cannot race two callers into double-starting
+	// dinit. Without this, two simultaneous user-mode startups (e.g. two
+	// sys-orchestrd --user instances activating different units at the same
+	// time) each see `dinitctl list` fail and each spawn their own dinit; both
+	// then fight over the dinitctl socket and user services silently fail to
+	// start. The lock is held only across the gate check + spawn + readiness
+	// poll, not while running the actual user command.
+	lockPath := filepath.Join(runtimeDir(), "dinit-user.lock")
+	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0644)
+	if err != nil {
+		return fmt.Errorf("open user dinit lock: %w", err)
+	}
+	defer lockFile.Close()
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
+		return fmt.Errorf("acquire user dinit lock: %w", err)
+	}
+	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+
 	if err := dinitctlCommand("list").Run(); err == nil {
 		syncUserDinitEnvironment()
 		return nil
@@ -1160,7 +1180,7 @@ func printLogs(unitName string, follow bool, lines string) {
 	}
 	cmd := exec.Command("journalctl", args...)
 	out, err := cmd.CombinedOutput()
-	filtered := filterLogLines(string(out), journalIdentifier(unitName))
+	filtered := filterLogLines(string(out), util.JournalIdentifier(unitName))
 	if err == nil && len(filtered) > 0 {
 		for _, line := range filtered {
 			fmt.Println(line)
@@ -1171,7 +1191,7 @@ func printLogs(unitName string, follow bool, lines string) {
 }
 
 func followSyslog(unitName string) {
-	identifier := journalIdentifier(unitName)
+	identifier := util.JournalIdentifier(unitName)
 	paths := []string{"/var/log/messages", "/var/log/syslog", "/var/log/daemon.log", "/var/log/user.log"}
 	offsets := make(map[string]int64, len(paths))
 	for _, path := range paths {
@@ -1242,7 +1262,7 @@ func printSyslogFallback(unitName string, lines string) {
 			limit = n
 		}
 	}
-	identifier := journalIdentifier(unitName)
+	identifier := util.JournalIdentifier(unitName)
 	paths := []string{"/var/log/messages", "/var/log/syslog", "/var/log/daemon.log", "/var/log/user.log"}
 	matches := make([]string, 0)
 	for _, path := range paths {

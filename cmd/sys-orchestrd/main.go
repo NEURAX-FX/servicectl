@@ -21,26 +21,27 @@ import (
 	"syscall"
 	"time"
 
+	"servicectl/internal/util"
 	"servicectl/internal/visionapi"
 )
 
 type daemon struct {
-	unit       string
-	group      string
-	userMode   bool
-	runtime    string
-	state      string
-	stateFile  string
-	serviceName string
-	logger     *log.Logger
-	syslogger  syslogSink
-	maxFailures int
+	unit         string
+	group        string
+	userMode     bool
+	runtime      string
+	state        string
+	stateFile    string
+	serviceName  string
+	logger       *log.Logger
+	syslogger    syslogSink
+	maxFailures  int
 	failureCount int
-	fused     bool
-	fuseReason string
-	groups     map[string]bool
-	groupUnits []string
-	debug      *startupDebugger
+	fused        bool
+	fuseReason   string
+	groups       map[string]bool
+	groupUnits   []string
+	debug        *startupDebugger
 }
 
 type syslogSink interface {
@@ -234,12 +235,12 @@ func (d *daemon) handleEvent(event visionapi.EventEnvelope) error {
 			return nil
 		}
 		if phase == "ready" || child == "running" {
-			d.writeState("running", firstNonEmpty(phase, child))
-			d.publishState("running", firstNonEmpty(phase, child))
+			d.writeState("running", util.FirstNonEmpty(phase, child))
+			d.publishState("running", util.FirstNonEmpty(phase, child))
 		}
 		if phase == "stopping" || child == "stopping" {
-			d.writeState("stopping", firstNonEmpty(phase, child))
-			d.publishState("stopping", firstNonEmpty(phase, child))
+			d.writeState("stopping", util.FirstNonEmpty(phase, child))
+			d.publishState("stopping", util.FirstNonEmpty(phase, child))
 		}
 	case visionapi.SourceServicectl:
 		if event.Payload["action"] == "stop" && event.Payload["result"] == "ok" {
@@ -382,14 +383,14 @@ func (d *daemon) writeState(state string, reason string) {
 		"state=" + state,
 		"reason=" + reason,
 		"failure_count=" + strconv.Itoa(d.failureCount),
-		"fused=" + yesNo(d.fused),
+		"fused=" + util.YesNo(d.fused),
 		"updated_at=" + time.Now().UTC().Format(time.RFC3339Nano),
 	}, "\n") + "\n"
 	_ = os.WriteFile(d.stateFile, []byte(content), 0644)
 }
 
 func (d *daemon) publishState(state string, reason string) {
-	payload := map[string]string{"state": state, "reason": reason, "service": d.serviceName, "failure_count": strconv.Itoa(d.failureCount), "fused": yesNo(d.fused)}
+	payload := map[string]string{"state": state, "reason": reason, "service": d.serviceName, "failure_count": strconv.Itoa(d.failureCount), "fused": util.YesNo(d.fused)}
 	envelope := visionapi.NewEvent(visionapi.ModeForUser(d.userMode), visionapi.SourceSysOrchestrd, visionapi.KindUnitOrchestration, d.objectName(), payload)
 	data, err := json.Marshal(envelope)
 	if err != nil {
@@ -494,21 +495,12 @@ func orchestrdStateFile(unit string, userMode bool, runtime string) string {
 	return filepath.Join(visionapi.RuntimeDir(userMode, runtime), "orchestrd", name)
 }
 
-func sanitizeS6Name(value string) string {
-	replacer := strings.NewReplacer("/", "-", ".", "-", ":", "-", " ", "-")
-	clean := strings.Trim(replacer.Replace(strings.TrimSpace(value)), "-")
-	if clean == "" {
-		return "service"
-	}
-	return clean
-}
-
 func orchestrdServiceName(unit string, group string) string {
 	if strings.TrimSpace(group) != "" {
-		return "group-" + sanitizeS6Name(group) + "-orchestrd"
+		return "group-" + util.SanitizeS6Name(group, "service") + "-orchestrd"
 	}
 	base := strings.TrimSuffix(strings.TrimSpace(unit), ".service")
-	return sanitizeS6Name(base) + "-orchestrd"
+	return util.SanitizeS6Name(base, "service") + "-orchestrd"
 }
 
 func maxFailureThreshold() int {
@@ -521,13 +513,6 @@ func maxFailureThreshold() int {
 		return 3
 	}
 	return n
-}
-
-func yesNo(value bool) string {
-	if value {
-		return "yes"
-	}
-	return "no"
 }
 
 func isPermanentStartError(msg string) bool {
@@ -577,17 +562,17 @@ func (d *daemon) recordAttemptFailure(err *operationError) {
 		return
 	}
 	d.failureCount++
-	d.logError("attempt failed service=%s object=%s attempt=%d/%d fused=%s %s", d.serviceName, d.objectName(), d.failureCount, d.maxFailures, yesNo(d.fused), err.Error())
+	d.logError("attempt failed service=%s object=%s attempt=%d/%d fused=%s %s", d.serviceName, d.objectName(), d.failureCount, d.maxFailures, util.YesNo(d.fused), err.Error())
 	if d.failureCount >= d.maxFailures {
 		d.fused = true
 		d.fuseReason = err.Error()
-		d.writeState("failed", "fused:"+firstNonEmpty(err.Action, "start-error"))
-		d.publishState("failed", "fused:"+firstNonEmpty(err.Action, "start-error"))
+		d.writeState("failed", "fused:"+util.FirstNonEmpty(err.Action, "start-error"))
+		d.publishState("failed", "fused:"+util.FirstNonEmpty(err.Action, "start-error"))
 		d.logError("circuit fuse open service=%s object=%s reason=%s", d.serviceName, d.objectName(), d.fuseReason)
 		return
 	}
-	d.writeState("failed", firstNonEmpty(err.Action, "start-error"))
-	d.publishState("failed", firstNonEmpty(err.Action, "start-error"))
+	d.writeState("failed", util.FirstNonEmpty(err.Action, "start-error"))
+	d.publishState("failed", util.FirstNonEmpty(err.Action, "start-error"))
 }
 
 func (d *daemon) clearFuse(trigger string) {
@@ -620,13 +605,4 @@ func (d *daemon) attemptStartWithRetry(reason string, runner func() *operationEr
 		time.Sleep(500 * time.Millisecond)
 	}
 	return false
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return strings.TrimSpace(value)
-		}
-	}
-	return ""
 }

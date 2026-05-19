@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"servicectl/internal/util"
 	"servicectl/internal/visionapi"
 )
 
@@ -201,7 +202,7 @@ func (d *daemon) handleMeta(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	writeJSON(w, d.meta())
+	util.WriteJSON(w, d.meta())
 }
 
 func (d *daemon) handleWatch(mode string, w http.ResponseWriter, r *http.Request) {
@@ -217,7 +218,7 @@ func (d *daemon) handleWatch(mode string, w http.ResponseWriter, r *http.Request
 	filter := visionapi.WatchFilter{
 		Source: r.URL.Query().Get("source"),
 		Kind:   r.URL.Query().Get("kind"),
-		Mode:   firstNonEmpty(strings.TrimSpace(r.URL.Query().Get("mode")), mode),
+		Mode:   util.FirstNonEmpty(strings.TrimSpace(r.URL.Query().Get("mode")), mode),
 		Unit:   r.URL.Query().Get("unit"),
 		Group:  r.URL.Query().Get("group"),
 		Key:    r.URL.Query().Get("key"),
@@ -298,7 +299,11 @@ func (d *daemon) subscribe(filter visionapi.WatchFilter) (int, chan visionapi.Ev
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.nextID++
-	ch := make(chan visionapi.EventEnvelope, 32)
+	// 256 is enough to absorb the startup event burst from a large dependency
+	// graph (e.g. slurmctld pulling in 20+ deps) without the broadcaster having
+	// to drop events on slow subscribers. The previous 32 overflowed and
+	// triggered the "dropping slow subscriber" log spam during normal boots.
+	ch := make(chan visionapi.EventEnvelope, 256)
 	d.subs[d.nextID] = subscriber{filter: filter, ch: ch}
 	return d.nextID, ch
 }
@@ -391,20 +396,4 @@ func copyResponse(w http.ResponseWriter, resp *http.Response) {
 	}
 	w.WriteHeader(resp.StatusCode)
 	_, _ = io.Copy(w, resp.Body)
-}
-
-func writeJSON(w http.ResponseWriter, value any) {
-	w.Header().Set("Content-Type", "application/json")
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	_ = enc.Encode(value)
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return strings.TrimSpace(value)
-		}
-	}
-	return ""
 }

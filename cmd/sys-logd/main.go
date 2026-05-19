@@ -12,6 +12,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"servicectl/internal/util"
 )
 
 const (
@@ -41,7 +43,7 @@ type statusReporter struct {
 
 func main() {
 	cfg := parseFlags()
-	identifier := journalIdentifier(cfg.service)
+	identifier := util.JournalIdentifier(cfg.service)
 	reporter := &statusReporter{service: cfg.service}
 	spill := newSpillManager(cfg.service, cfg.spillDir, cfg.spillMaxBytes, cfg.spillRotations)
 	var spillMode atomic.Bool
@@ -240,14 +242,6 @@ func parseFlags() config {
 	cfg.spillMaxBytes = maxInt64(1024, envInt64("SERVICECTL_LOGD_SPILL_MAX_BYTES", defaultSpillMaxBytes))
 	cfg.spillRotations = maxInt(1, envInt("SERVICECTL_LOGD_SPILL_ROTATIONS", defaultSpillRotations))
 	return cfg
-}
-
-func journalIdentifier(service string) string {
-	service = strings.TrimSpace(service)
-	if service == "" {
-		service = "service"
-	}
-	return "servicectl[" + service + "]"
 }
 
 func envString(name string, fallback string) string {

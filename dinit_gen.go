@@ -98,14 +98,6 @@ func loggerServiceName(serviceName string) string {
 	return serviceName + "-log"
 }
 
-func journalIdentifier(serviceName string) string {
-	cleanName := strings.TrimSuffix(strings.TrimSpace(serviceName), ".service")
-	if cleanName == "" {
-		cleanName = "service"
-	}
-	return "servicectl[" + cleanName + "]"
-}
-
 func generateLoggerDinit(serviceName string, logicalName string) string {
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("# Log consumer for %s\n", serviceName))

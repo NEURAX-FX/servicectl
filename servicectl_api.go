@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"servicectl/internal/util"
 	"servicectl/internal/visionapi"
 )
 
@@ -196,13 +197,6 @@ func collectUnitSnapshots(cfg Config) visionapi.UnitsResponse {
 	return result
 }
 
-func writeJSON(w http.ResponseWriter, value any) {
-	w.Header().Set("Content-Type", "application/json")
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	_ = enc.Encode(value)
-}
-
 func writeEvent(w io.Writer, event visionapi.EventEnvelope) error {
 	return json.NewEncoder(w).Encode(event)
 }
@@ -241,7 +235,7 @@ func (s servicectlPlaneServer) handler() http.Handler {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
-		writeJSON(w, collectUnitSnapshots(s.cfg))
+		util.WriteJSON(w, collectUnitSnapshots(s.cfg))
 	})
 	mux.HandleFunc("/v1/events", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -296,10 +290,10 @@ func (s servicectlPlaneServer) handler() http.Handler {
 		snapshot, err := buildUnitSnapshot(s.cfg, name)
 		if err != nil {
 			w.WriteHeader(http.StatusNotFound)
-			writeJSON(w, map[string]string{"error": err.Error()})
+			util.WriteJSON(w, map[string]string{"error": err.Error()})
 			return
 		}
-		writeJSON(w, snapshot)
+		util.WriteJSON(w, snapshot)
 	})
 	return mux
 }

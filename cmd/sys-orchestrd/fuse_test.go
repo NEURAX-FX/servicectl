@@ -117,14 +117,14 @@ func TestRecordAttemptSuccessLogsOnlyToSyslog(t *testing.T) {
 	var terminal bytes.Buffer
 	sys := &fakeSyslog{}
 	d := &daemon{
-		logger:      log.New(&terminal, "", 0),
-		syslogger:   sys,
-		serviceName: "slurmctld-orchestrd",
-		unit:        "slurmctld.service",
-		maxFailures: 3,
+		logger:       log.New(&terminal, "", 0),
+		syslogger:    sys,
+		serviceName:  "slurmctld-orchestrd",
+		unit:         "slurmctld.service",
+		maxFailures:  3,
 		failureCount: 2,
-		fused:       true,
-		fuseReason:  "previous error",
+		fused:        true,
+		fuseReason:   "previous error",
 	}
 
 	d.recordAttemptSuccess("initial-start")
