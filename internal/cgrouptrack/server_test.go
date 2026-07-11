@@ -78,6 +78,24 @@ func TestAuthorizeUserAttachOwnershipAndCgroupBoundary(t *testing.T) {
 	}
 }
 
+func TestManagedProcessScopeSupportsHierarchyRoot(t *testing.T) {
+	mode, uid, managed := managedProcessScope("/system/demo", "/")
+	if !managed || mode != ModeSystem || uid != 0 {
+		t.Fatalf("mode=%q uid=%d managed=%v", mode, uid, managed)
+	}
+	mode, uid, managed = managedProcessScope("/user/1000/demo", "/")
+	if !managed || mode != ModeUser || uid != 1000 {
+		t.Fatalf("mode=%q uid=%d managed=%v", mode, uid, managed)
+	}
+}
+
+func TestServerPreservesExplicitHierarchyRoot(t *testing.T) {
+	server := NewServer(ServerOptions{ManagedCgroupPath: "/"})
+	if server.managedPath != "/" {
+		t.Fatalf("managed path = %q", server.managedPath)
+	}
+}
+
 func TestServerClientRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "sys-cgroupd.sock")
 	proc := &authProc{namespace: FileIdentity{Device: 1, Inode: 2}}

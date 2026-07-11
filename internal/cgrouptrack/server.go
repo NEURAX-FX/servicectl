@@ -81,8 +81,8 @@ func NewServer(options ServerOptions) *Server {
 	if maxPerUID <= 0 {
 		maxPerUID = defaultMaxPerUID
 	}
-	managedPath := strings.TrimSuffix(filepath.Clean(options.ManagedCgroupPath), "/")
-	if managedPath == "." || managedPath == "" {
+	managedPath := filepath.Clean(options.ManagedCgroupPath)
+	if managedPath == "." || options.ManagedCgroupPath == "" {
 		managedPath = "/servicectl.slice"
 	}
 	resolvePeer := options.ResolvePeer
@@ -286,11 +286,17 @@ func authorizeAttachPID(peer Peer, request Request, proc ProcFS, managedRoot str
 func managedProcessScope(path string, managedRoot string) (Mode, uint32, bool) {
 	root := "/" + strings.Trim(strings.TrimSpace(managedRoot), "/")
 	clean := filepath.Clean(path)
-	prefix := root + "/"
+	prefix := root
+	if root != "/" {
+		prefix += "/"
+	}
 	if clean != root && !strings.HasPrefix(clean, prefix) {
 		return "", 0, false
 	}
 	relative := strings.TrimPrefix(clean, prefix)
+	if root == "/" {
+		relative = strings.TrimPrefix(clean, "/")
+	}
 	parts := strings.Split(relative, "/")
 	if len(parts) >= 1 && parts[0] == "system" {
 		return ModeSystem, 0, true

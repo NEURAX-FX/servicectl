@@ -841,6 +841,58 @@ func unifiedCgroupMount(mountinfo, selfCgroup string) (string, error) {
 	return "", errors.New("cgroup v2 mount was not found")
 }
 
+func managedHierarchyPath(mountPoint, filesystemRoot string) (string, error) {
+	mountPoint = filepath.Clean(mountPoint)
+	filesystemRoot = filepath.Clean(filesystemRoot)
+	relative, err := filepath.Rel(mountPoint, filesystemRoot)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return "", errors.New("managed root is outside the cgroup v2 mount")
+	}
+	if relative == "." {
+		return "/", nil
+	}
+	return "/" + filepath.ToSlash(relative), nil
+}
+
+func managedHierarchyPathFromMountInfo(mountinfo, filesystemRoot string) (string, error) {
+	filesystemRoot = filepath.Clean(filesystemRoot)
+	bestPoint := ""
+	bestRoot := ""
+	for _, line := range strings.Split(mountinfo, "\n") {
+		parts := strings.Split(line, " - ")
+		if len(parts) != 2 {
+			continue
+		}
+		right := strings.Fields(parts[1])
+		left := strings.Fields(parts[0])
+		if len(right) < 1 || right[0] != "cgroup2" || len(left) < 5 {
+			continue
+		}
+		mountRoot := filepath.Clean(unescapeMountPath(left[3]))
+		mountPoint := filepath.Clean(unescapeMountPath(left[4]))
+		relative, err := filepath.Rel(mountPoint, filesystemRoot)
+		if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			continue
+		}
+		if len(mountPoint) > len(bestPoint) {
+			bestPoint = mountPoint
+			bestRoot = mountRoot
+		}
+	}
+	if bestPoint == "" {
+		return "", errors.New("managed root is outside every cgroup v2 mount")
+	}
+	relative, err := filepath.Rel(bestPoint, filesystemRoot)
+	if err != nil {
+		return "", err
+	}
+	path := filepath.Join(bestRoot, relative)
+	if !filepath.IsAbs(path) {
+		path = "/" + path
+	}
+	return filepath.Clean(path), nil
+}
+
 func prepareCgroupRoot(path string) (string, error) {
 	clean := filepath.Clean(path)
 	if clean != defaultCgroupRoot {
@@ -883,6 +935,18 @@ func main() {
 	}
 	proc := cgrouptrack.NewLinuxProcFS("/proc")
 	root, rootErr := prepareCgroupRoot(cfg.cgroupRoot)
+	managedPath := "/"
+	mountinfo, mountErr := os.ReadFile("/proc/self/mountinfo")
+	managedRoot := root
+	if managedRoot == "" {
+		managedRoot = cfg.cgroupRoot
+	}
+	if mountErr == nil {
+		managedPath, mountErr = managedHierarchyPathFromMountInfo(string(mountinfo), managedRoot)
+	}
+	if mountErr != nil {
+		rootErr = errors.Join(rootErr, fmt.Errorf("map managed cgroup hierarchy: %w", mountErr))
+	}
 	var groups cgrouptrack.CgroupFS
 	if rootErr == nil {
 		groups, rootErr = cgrouptrack.OpenCgroupFS(root)
@@ -908,7 +972,7 @@ func main() {
 	hup := make(chan os.Signal, 1)
 	signal.Notify(hup, syscall.SIGHUP)
 	defer signal.Stop(hup)
-	server := cgrouptrack.NewServer(cgrouptrack.ServerOptions{Path: cfg.socketPath, Mode: 0o666, Service: scheduler, Proc: proc, ManagedCgroupPath: cfg.cgroupRoot})
+	server := cgrouptrack.NewServer(cgrouptrack.ServerOptions{Path: cfg.socketPath, Mode: 0o666, Service: scheduler, Proc: proc, ManagedCgroupPath: managedPath})
 	errCh := make(chan error, 1)
 	go func() { errCh <- server.Serve(ctx) }()
 	systemSource := &unixVisionSource{path: visionapi.SysvisionSocketPathForMode(visionapi.ModeSystem), trustedMode: visionapi.ModeSystem}

@@ -176,6 +176,41 @@ func TestParseUnifiedMountIgnoresV1Controllers(t *testing.T) {
 	}
 }
 
+func TestManagedHierarchyPathMapsFilesystemRoot(t *testing.T) {
+	tests := []struct {
+		mountRoot string
+		fsRoot    string
+		want      string
+	}{
+		{"/sys/fs/cgroup", "/sys/fs/cgroup/servicectl.slice", "/servicectl.slice"},
+		{"/sys/fs/cgroup", "/sys/fs/cgroup/delegated/servicectl", "/delegated/servicectl"},
+		{"/sys/fs/cgroup", "/sys/fs/cgroup", "/"},
+	}
+	for _, test := range tests {
+		got, err := managedHierarchyPath(test.mountRoot, test.fsRoot)
+		if err != nil {
+			t.Fatalf("managedHierarchyPath(%q, %q): %v", test.mountRoot, test.fsRoot, err)
+		}
+		if got != test.want {
+			t.Fatalf("managedHierarchyPath(%q, %q) = %q, want %q", test.mountRoot, test.fsRoot, got, test.want)
+		}
+	}
+	if _, err := managedHierarchyPath("/sys/fs/cgroup", "/tmp/not-cgroup"); err == nil {
+		t.Fatal("root outside cgroup mount was accepted")
+	}
+}
+
+func TestManagedHierarchyPathUsesMountRoot(t *testing.T) {
+	mountinfo := "20 1 0:19 /delegated /sys/fs/cgroup/delegated rw - cgroup2 cgroup2 rw\n"
+	got, err := managedHierarchyPathFromMountInfo(mountinfo, "/sys/fs/cgroup/delegated/servicectl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "/delegated/servicectl" {
+		t.Fatalf("managed path = %q", got)
+	}
+}
+
 func TestSchedulerReplacesDegradedGroups(t *testing.T) {
 	bad := &unavailableGroups{root: "/bad", err: errors.New("unavailable")}
 	good := newSchedulerGroups()
