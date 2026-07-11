@@ -1,0 +1,6 @@
+# servicectl cgroup v2 process tracker
+type = process
+command = /usr/bin/sys-cgroupd
+restart = true
+smooth-recovery = true
+log-type = buffer

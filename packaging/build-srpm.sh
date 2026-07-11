@@ -5,7 +5,7 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 ROOT_DIR=$(cd -- "$SCRIPT_DIR/.." && pwd)
 OUTPUT_DIR="$ROOT_DIR/dist/srpm"
 CACHE_DIR="$SCRIPT_DIR/sources"
-VERSION=0.1.0
+VERSION=0.2.0
 RELEASE=1
 OFFLINE=0
 ALLOW_DIRTY=0
@@ -17,7 +17,7 @@ Usage: packaging/build-srpm.sh [options]
 Options:
   --output-dir DIR  Write the resulting SRPM to DIR
   --cache-dir DIR   Read verified third-party archives from DIR
-  --version VERSION Set the servicectl package version (default: 0.1.0)
+  --version VERSION Set the servicectl package version (default: 0.2.0)
   --release RELEASE Set the RPM release number (default: 1)
   --offline         Do not download missing third-party archives
   --allow-dirty     Include current uncommitted worktree changes

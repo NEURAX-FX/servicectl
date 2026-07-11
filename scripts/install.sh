@@ -15,6 +15,7 @@ Usage: scripts/install.sh [--prefix DIR] [--bindir DIR] [--system] [--also-syste
 Installs:
   - servicectl
   - sys-notifyd
+  - sys-cgroupd
   - sys-dbusd
   - sys-logd
   - sys-propertyd
@@ -115,6 +116,7 @@ build_and_install() {
 
 build_and_install servicectl "$ROOT"
 build_and_install sys-notifyd "$ROOT/cmd/sys-notifyd"
+build_and_install sys-cgroupd "$ROOT/cmd/sys-cgroupd"
 build_and_install sys-dbusd "$ROOT/cmd/sys-dbusd"
 build_and_install sys-logd "$ROOT/cmd/sys-logd"
 build_and_install sys-propertyd "$ROOT/cmd/sys-propertyd"
@@ -139,11 +141,20 @@ if [[ "$SYSTEM_MODE" -eq 1 || "$INSTALL_SYSTEM_COPY" -eq 1 ]]; then
     'restart = true' \
     'smooth-recovery = true' \
     'log-type = buffer' > /etc/dinit.d/sys-dbusd
+  printf '%s\n' \
+    '# servicectl cgroup v2 process tracker' \
+    'type = process' \
+    'command = /usr/local/bin/sys-cgroupd' \
+    'restart = true' \
+    'smooth-recovery = true' \
+    'log-type = buffer' > /etc/dinit.d/sys-cgroupd
+  install -d -m 0700 /run/servicectl/sys-cgroupd
 fi
 
 printf '\nInstalled binaries:\n'
 printf '  %s\n' "$BINDIR/servicectl"
 printf '  %s\n' "$BINDIR/sys-notifyd"
+printf '  %s\n' "$BINDIR/sys-cgroupd"
 printf '  %s\n' "$BINDIR/sys-dbusd"
 printf '  %s\n' "$BINDIR/sys-logd"
 printf '  %s\n' "$BINDIR/sys-propertyd"
@@ -152,6 +163,7 @@ printf '  %s\n' "$BINDIR/sys-orchestrd"
 if [[ "$INSTALL_SYSTEM_COPY" -eq 1 ]]; then
   printf '  %s\n' "$SYSTEM_BINDIR/servicectl"
   printf '  %s\n' "$SYSTEM_BINDIR/sys-notifyd"
+  printf '  %s\n' "$SYSTEM_BINDIR/sys-cgroupd"
   printf '  %s\n' "$SYSTEM_BINDIR/sys-dbusd"
   printf '  %s\n' "$SYSTEM_BINDIR/sys-logd"
   printf '  %s\n' "$SYSTEM_BINDIR/sys-propertyd"

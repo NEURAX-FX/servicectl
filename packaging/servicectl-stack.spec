@@ -1,4 +1,4 @@
-%{!?servicectl_version:%global servicectl_version 0.1.0}
+%{!?servicectl_version:%global servicectl_version 0.2.0}
 %{!?stack_release:%global stack_release 1}
 %global skalibs_version 2.15.0.0
 %global execline_version 2.9.9.1
@@ -268,6 +268,7 @@ export GOTOOLCHAIN=local
 export CGO_ENABLED=0
 go build -trimpath -buildvcs=false -ldflags "-X main.version=%{servicectl_version}" -o _build/bin/servicectl .
 go build -trimpath -buildvcs=false -o _build/bin/sys-notifyd ./cmd/sys-notifyd
+go build -trimpath -buildvcs=false -o _build/bin/sys-cgroupd ./cmd/sys-cgroupd
 go build -trimpath -buildvcs=false -o _build/bin/sys-dbusd ./cmd/sys-dbusd
 go build -trimpath -buildvcs=false -o _build/bin/sys-logd ./cmd/sys-logd
 go build -trimpath -buildvcs=false -o _build/bin/sys-propertyd ./cmd/sys-propertyd
@@ -291,6 +292,7 @@ fi
 make -C _deps/dinit-%{dinit_version} DESTDIR=%{buildroot} install
 install -Dpm0755 _build/bin/servicectl %{buildroot}%{_bindir}/servicectl
 install -Dpm0755 _build/bin/sys-notifyd %{buildroot}%{_bindir}/sys-notifyd
+install -Dpm0755 _build/bin/sys-cgroupd %{buildroot}%{_bindir}/sys-cgroupd
 install -Dpm0755 _build/bin/sys-dbusd %{buildroot}%{_bindir}/sys-dbusd
 install -Dpm0755 _build/bin/sys-logd %{buildroot}%{_bindir}/sys-logd
 install -Dpm0755 _build/bin/sys-propertyd %{buildroot}%{_bindir}/sys-propertyd
@@ -298,6 +300,7 @@ install -Dpm0755 _build/bin/sysvisiond %{buildroot}%{_bindir}/sysvisiond
 install -Dpm0755 _build/bin/sys-orchestrd %{buildroot}%{_bindir}/sys-orchestrd
 install -Dpm4750 cmd/sys-dbusd-daemon-helper/sys-dbusd-daemon-helper %{buildroot}%{_libexecdir}/servicectl/sys-dbusd-daemon-helper
 install -Dpm0644 packaging/sys-dbusd %{buildroot}%{_sysconfdir}/dinit.d/sys-dbusd
+install -Dpm0644 packaging/sys-cgroupd %{buildroot}%{_sysconfdir}/dinit.d/sys-cgroupd
 install -Dpm0644 packaging/50-servicectl-activation.conf %{buildroot}%{_prefix}/lib/servicectl/dbus-activation/50-servicectl-activation.conf
 install -Dpm0644 usr/lib/servicectl/socket-holders.d/dbus.conf %{buildroot}%{_prefix}/lib/servicectl/socket-holders.d/dbus.conf
 install -Dpm0644 %{SOURCE6} %{buildroot}%{_tmpfilesdir}/servicectl.conf
@@ -326,7 +329,7 @@ printf 'oneshot\n' > _check-s6rc/source/hello/type
 printf '/bin/true\n' > _check-s6rc/source/hello/up
 "$PWD/.stage%{_bindir}/s6-rc-compile" "$PWD/_check-s6rc/compiled" "$PWD/_check-s6rc/source"
 
-for binary in servicectl sys-notifyd sys-dbusd sys-logd sys-propertyd sysvisiond sys-orchestrd; do
+for binary in servicectl sys-notifyd sys-cgroupd sys-dbusd sys-logd sys-propertyd sysvisiond sys-orchestrd; do
   test -x "%{buildroot}%{_bindir}/$binary"
 done
 test ! -e "%{buildroot}%{_bindir}/notify-echod"
@@ -349,6 +352,7 @@ test ! -e "%{buildroot}/run"
 %doc README.md packaging/SRPM-DESIGN.md
 %{_bindir}/servicectl
 %{_bindir}/sys-notifyd
+%{_bindir}/sys-cgroupd
 %{_bindir}/sys-dbusd
 %{_bindir}/sys-logd
 %{_bindir}/sys-propertyd
@@ -358,6 +362,7 @@ test ! -e "%{buildroot}/run"
 %attr(4750,root,dbus) %{_libexecdir}/servicectl/sys-dbusd-daemon-helper
 %{_tmpfilesdir}/servicectl.conf
 %config(noreplace) %{_sysconfdir}/dinit.d/sys-dbusd
+%config(noreplace) %{_sysconfdir}/dinit.d/sys-cgroupd
 %dir %{_sysconfdir}/dbus-1/system-services
 %dir %{_sharedstatedir}/servicectl
 
@@ -425,5 +430,8 @@ test ! -e "%{buildroot}/run"
 %{_libdir}/skalibs/
 
 %changelog
-* Fri Jul 10 2026 servicectl contributors <noreply@example.invalid> - %{servicectl_version}-%{stack_release}
+* Sat Jul 11 2026 servicectl contributors <noreply@example.invalid> - %{servicectl_version}-%{stack_release}
+- Add sys-cgroupd cgroup v2 process tracking
+
+* Fri Jul 10 2026 servicectl contributors <noreply@example.invalid> - 0.1.0-1
 - Initial self-contained Fedora stack package
