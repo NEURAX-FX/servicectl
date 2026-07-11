@@ -14,7 +14,8 @@ It does not:
 - write `cgroup.kill`
 - replace Dinit, s6, `sys-notifyd`, or servicectl lifecycle control
 - discover service ownership by executable name, command line, or UID
-- mount or remount cgroup v2
+- remount or unmount cgroup v2
+- mount cgroup2 over an existing filesystem or non-empty directory
 
 The first release covers both system and user services. All servicectl-managed
 services are eligible for automatic tracking. A service starts independently
@@ -72,35 +73,42 @@ startup gate.
 The daemon first locates the cgroup v2 mount by parsing `/proc/self/mountinfo`
 for filesystem type `cgroup2`, then confirms that `/proc/self/cgroup` contains
 the unified `0::` entry. Legacy v1 controller entries such as `freezer`,
-`memory`, `cpuset`, `cpu`, or `blkio` are ignored. On a normal unified or hybrid
-host the default managed root is therefore:
+`memory`, `cpuset`, `cpu`, or `blkio` are ignored. If no cgroup2 mount is
+visible, the daemon may mount cgroup2 at `/sys/fs/cgroup` only when the target
+is a real empty directory. Existing filesystems and non-empty directories are
+never hidden. Auto-mount is enabled by default and can be disabled with
+`--no-auto-mount`. On a normal unified or hybrid host the default managed root
+is therefore:
 
 ```text
 /sys/fs/cgroup/servicectl.slice
 ```
 
 An administrator may pass `--cgroup-root` to select an existing writable,
-delegated cgroup v2 subtree. `sys-cgroupd` verifies the selected root but does
-not mount cgroup2 or modify the outer manager's configuration.
+delegated cgroup v2 subtree. `sys-cgroupd` verifies the selected root and never
+mounts directly at that custom leaf. It never remounts or unmounts cgroup2 and
+does not modify the outer manager's controller configuration.
 
 The fixed hierarchy is:
 
 ```text
 /sys/fs/cgroup/servicectl.slice/
 |-- system/
-|   `-- <encoded-unit>/
+|   `-- <service-stem>/
 `-- user/
     `-- <uid>/
-        `-- <encoded-unit>/
+        `-- <service-stem>/
 ```
 
 Service groups are leaves. Clients never provide a cgroup path. They provide a
 structured mode, UID, and unit name, from which the daemon derives the path.
 
-Unit names use a deterministic, reversible encoding without path separators.
-The decoder must reproduce a canonical valid unit name. Empty names, `.`,
-`..`, NUL, slash, backslash, non-canonical aliases, and malformed encodings are
-rejected.
+Unit directories use the canonical service name without its final `.service`
+suffix. The decoder restores exactly one `.service` suffix. Empty names, `.`,
+`..`, NUL, slash, backslash, and non-canonical aliases are rejected. Legacy
+Base64 directories are recognized for known units and migrated to readable
+names during reconciliation; if both leaves exist, member PIDs are moved into
+the readable leaf before the legacy leaf is removed.
 
 `sys-cgroupd` does not write `cgroup.subtree_control` and does not enable any
 controllers. It never writes `cpu.*`, `memory.*`, `io.*`, `pids.*`,
@@ -163,7 +171,8 @@ plane is served from that user's runtime directory under `/run/user/<uid>`.
 Unit snapshots and lifecycle events gain an explicit UID field:
 
 - system plane snapshots use UID 0
-- user plane snapshots use the actual user UID
+- user plane snapshots use the actual user UID, including UID 0 for the root
+  user's isolated user plane
 
 The root `sys-cgroupd` observes valid numeric runtime directories, verifies
 directory and socket ownership, and subscribes to each user's watch endpoint.

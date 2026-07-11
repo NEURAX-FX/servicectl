@@ -28,9 +28,6 @@ func (k UnitKey) Validate() error {
 			return errors.New("system unit UID must be zero")
 		}
 	case ModeUser:
-		if k.UID == 0 {
-			return errors.New("user unit UID must be nonzero")
-		}
 	default:
 		return fmt.Errorf("invalid cgroup mode %q", k.Mode)
 	}
@@ -52,31 +49,57 @@ func validateUnitName(name string) error {
 	if !strings.HasSuffix(name, ".service") || strings.Count(name, ".service") != 1 || name == ".service" {
 		return errors.New("unit name must have one canonical .service suffix")
 	}
+	stem := strings.TrimSuffix(name, ".service")
+	if stem == "." || stem == ".." {
+		return errors.New("unit name becomes a forbidden path component")
+	}
 	return nil
 }
 
-func (k UnitKey) EncodedUnit() (string, error) {
+func (k UnitKey) DirectoryName() (string, error) {
 	if err := k.Validate(); err != nil {
 		return "", err
 	}
-	return base64.RawURLEncoding.EncodeToString([]byte(k.Unit)), nil
+	return strings.TrimSuffix(k.Unit, ".service"), nil
 }
 
-func DecodeUnit(mode Mode, uid uint32, encoded string) (UnitKey, error) {
-	if encoded == "" {
-		return UnitKey{}, errors.New("encoded unit is empty")
+func DecodeUnitDirectory(mode Mode, uid uint32, directory string) (UnitKey, error) {
+	if directory == "" {
+		return UnitKey{}, errors.New("unit directory is empty")
 	}
-	data, err := base64.RawURLEncoding.DecodeString(encoded)
+	key := UnitKey{Mode: mode, UID: uid, Unit: directory + ".service"}
+	if err := key.Validate(); err != nil {
+		return UnitKey{}, err
+	}
+	canonical, _ := key.DirectoryName()
+	if canonical != directory {
+		return UnitKey{}, errors.New("unit directory is not canonical")
+	}
+	return key, nil
+}
+
+func legacyUnitDirectory(key UnitKey) (string, error) {
+	if err := key.Validate(); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString([]byte(key.Unit)), nil
+}
+
+func decodeLegacyUnitDirectory(mode Mode, uid uint32, directory string) (UnitKey, error) {
+	if directory == "" {
+		return UnitKey{}, errors.New("legacy unit directory is empty")
+	}
+	data, err := base64.RawURLEncoding.DecodeString(directory)
 	if err != nil {
-		return UnitKey{}, fmt.Errorf("decode unit: %w", err)
+		return UnitKey{}, fmt.Errorf("decode legacy unit directory: %w", err)
 	}
 	key := UnitKey{Mode: mode, UID: uid, Unit: string(data)}
 	if err := key.Validate(); err != nil {
 		return UnitKey{}, err
 	}
-	canonical, _ := key.EncodedUnit()
-	if canonical != encoded {
-		return UnitKey{}, errors.New("encoded unit is not canonical")
+	canonical, _ := legacyUnitDirectory(key)
+	if canonical != directory {
+		return UnitKey{}, errors.New("legacy unit directory is not canonical")
 	}
 	return key, nil
 }

@@ -315,7 +315,92 @@ func TestEnsureS6BundleUsesOnePlaneInUserMode(t *testing.T) {
 	if !strings.Contains(string(visionRun), "sysvisiond --mode=user") {
 		t.Fatalf("sysvisiond run script = %q", visionRun)
 	}
+	if s6SysvisiondServiceName() != "sysvisiond-user-0" {
+		t.Fatalf("user sysvisiond service name = %q", s6SysvisiondServiceName())
+	}
+	if s6ServicectlAPIServiceName() != "servicectl-api-user-0" {
+		t.Fatalf("user API service name = %q", s6ServicectlAPIServiceName())
+	}
+	defaultContents, err := os.ReadFile(s6DefaultContentsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(defaultContents), "sysvisiond-user-0") || !strings.Contains(string(defaultContents), "servicectl-api-user-0") {
+		t.Fatalf("default contents = %q", defaultContents)
+	}
 	if _, err := os.Stat(s6SysPropertydSourceDir()); !os.IsNotExist(err) {
 		t.Fatalf("user mode created sys-propertyd source: %v", err)
+	}
+}
+
+func TestS6OwnerModeDetection(t *testing.T) {
+	tmp := t.TempDir()
+	systemDir := filepath.Join(tmp, "system")
+	userDir := filepath.Join(tmp, "user")
+	if err := os.MkdirAll(systemDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(userDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(systemDir, "run"), []byte("sys-orchestrd --unit demo.service\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(userDir, "run"), []byte("sys-orchestrd --user --unit demo.service\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	previous := config
+	t.Cleanup(func() { config = previous })
+	config = buildConfig(false)
+	if !s6OwnerMatchesCurrentMode(systemDir) || s6OwnerMatchesCurrentMode(userDir) {
+		t.Fatal("system mode owner detection failed")
+	}
+	config = buildConfig(true)
+	if s6OwnerMatchesCurrentMode(systemDir) || !s6OwnerMatchesCurrentMode(userDir) {
+		t.Fatal("user mode owner detection failed")
+	}
+}
+
+func TestEnabledStandaloneServicesFiltersCurrentMode(t *testing.T) {
+	tmp := t.TempDir()
+	previousConfig := config
+	previousPaths := testS6PathsOverride
+	t.Cleanup(func() {
+		config = previousConfig
+		testS6PathsOverride = previousPaths
+	})
+	testS6PathsOverride = &s6PlanePaths{
+		SourceRoot:      filepath.Join(tmp, "s6", "rc"),
+		CompiledDir:     filepath.Join(tmp, "run", "s6", "compiled.servicectl"),
+		LiveDir:         filepath.Join(tmp, "run", "s6", "state"),
+		BundleDir:       filepath.Join(tmp, "s6", "rc", s6BundleName()),
+		BundleContents:  filepath.Join(tmp, "s6", "rc", s6BundleName(), "contents"),
+		DefaultContents: filepath.Join(tmp, "s6", "rc", "default", "contents"),
+	}
+	if err := os.MkdirAll(testS6PathsOverride.BundleDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(testS6PathsOverride.BundleContents, []byte("system-demo-orchestrd\nuser-demo-orchestrd\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for name, run := range map[string]string{
+		"system-demo-orchestrd": "sys-orchestrd --unit system-demo.service\n",
+		"user-demo-orchestrd":   "sys-orchestrd --user --unit user-demo.service\n",
+	} {
+		directory := filepath.Join(testS6PathsOverride.SourceRoot, name)
+		if err := os.MkdirAll(directory, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(directory, "run"), []byte(run), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	config = buildConfig(false)
+	if got := enabledStandaloneServicesFromS6Bundle(); len(got) != 1 || got[0] != "system-demo.service" {
+		t.Fatalf("system services = %#v", got)
+	}
+	config = buildConfig(true)
+	if got := enabledStandaloneServicesFromS6Bundle(); len(got) != 1 || got[0] != "user-demo.service" {
+		t.Fatalf("user services = %#v", got)
 	}
 }

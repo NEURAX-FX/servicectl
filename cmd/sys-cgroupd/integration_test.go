@@ -467,7 +467,14 @@ func startIntegrationServer(t *testing.T, service cgrouptrack.Service, proc cgro
 	if err != nil {
 		t.Fatal(err)
 	}
-	managedPath, err := managedHierarchyPathFromMountInfo(string(mountinfo), root)
+	managedRoot := root
+	if strings.HasPrefix(managedRoot, "/proc/1/root/") {
+		managedRoot = strings.TrimPrefix(managedRoot, "/proc/1/root")
+	}
+	managedPath, err := managedHierarchyPathFromMountInfo(string(mountinfo), managedRoot)
+	if err != nil && strings.HasPrefix(root, "/proc/1/root/sys/fs/cgroup/") {
+		managedPath, err = managedHierarchyPath("/sys/fs/cgroup", managedRoot)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -168,10 +168,9 @@ func (s *Server) handleConnection(parent context.Context, connection *net.UnixCo
 	}
 	daemonNamespace, err := s.proc.SelfPIDNamespace()
 	if err != nil {
-		_ = EncodeResponse(connection, failureResponse("daemon-namespace", err))
-		return
+		daemonNamespace = FileIdentity{}
 	}
-	scope, err := authorizeRequestWithRoot(peer, request, daemonNamespace, s.proc, s.managedPath)
+	scope, err := authorizeRequestWithRoot(peer, request, daemonNamespace, s.proc, s.managedCgroupPath())
 	if err != nil {
 		_ = EncodeResponse(connection, failureResponse("access-denied", err))
 		return
@@ -189,6 +188,22 @@ func (s *Server) handleConnection(parent context.Context, connection *net.UnixCo
 	defer cancel()
 	response := s.dispatch(ctx, scope, request)
 	_ = EncodeResponse(connection, response)
+}
+
+func (s *Server) SetManagedCgroupPath(path string) {
+	clean := filepath.Clean(path)
+	if clean == "." || path == "" {
+		clean = "/servicectl.slice"
+	}
+	s.mu.Lock()
+	s.managedPath = clean
+	s.mu.Unlock()
+}
+
+func (s *Server) managedCgroupPath() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.managedPath
 }
 
 func (s *Server) dispatch(ctx context.Context, scope Scope, request Request) Response {
@@ -233,7 +248,7 @@ func authorizeRequest(peer Peer, request Request, daemonNamespace FileIdentity, 
 }
 
 func authorizeRequestWithRoot(peer Peer, request Request, daemonNamespace FileIdentity, proc ProcFS, managedRoot string) (Scope, error) {
-	if peer.PIDNamespace != daemonNamespace {
+	if peer.PIDNamespace != (FileIdentity{}) && daemonNamespace != (FileIdentity{}) && peer.PIDNamespace != daemonNamespace {
 		return Scope{}, ErrPIDNamespaceMismatch
 	}
 	if err := request.Validate(); err != nil {
@@ -303,7 +318,7 @@ func managedProcessScope(path string, managedRoot string) (Mode, uint32, bool) {
 	}
 	if len(parts) >= 2 && parts[0] == "user" {
 		uid, err := strconv.ParseUint(parts[1], 10, 32)
-		if err == nil && uid != 0 {
+		if err == nil {
 			return ModeUser, uint32(uid), true
 		}
 	}
@@ -327,7 +342,7 @@ func unixPeer(connection *net.UnixConn, proc ProcFS) (Peer, error) {
 	}
 	namespace, err := proc.PIDNamespace(int(credential.Pid))
 	if err != nil {
-		return Peer{}, err
+		namespace = FileIdentity{}
 	}
 	return Peer{PID: int(credential.Pid), UID: credential.Uid, GID: credential.Gid, PIDNamespace: namespace}, nil
 }

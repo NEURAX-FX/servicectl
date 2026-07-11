@@ -3,6 +3,9 @@ package main
 import (
 	"context"
 	"errors"
+	"net"
+	"os"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strconv"
@@ -19,13 +22,42 @@ func TestConfigBounds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.cgroupRoot != "/tmp/cg" || cfg.settleDelay != 100*time.Millisecond || cfg.maxRounds != 8 {
+	if cfg.cgroupRoot != "/tmp/cg" || !cfg.autoMount || cfg.settleDelay != 100*time.Millisecond || cfg.maxRounds != 8 {
 		t.Fatalf("config = %#v", cfg)
 	}
 	for _, args := range [][]string{{"--settle-delay=1us"}, {"--reconcile-interval=100ms"}, {"--migration-deadline=1us"}, {"--migration-max-rounds=65"}} {
 		if _, err := parseConfig(args); err == nil {
 			t.Fatalf("unsafe config accepted: %#v", args)
 		}
+	}
+}
+
+func TestConfigAutoMount(t *testing.T) {
+	cfg, err := parseConfig([]string{"--no-auto-mount"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.autoMount {
+		t.Fatal("auto-mount remained enabled")
+	}
+}
+
+func TestDiscoverUserSourcesIncludesRootUser(t *testing.T) {
+	root := t.TempDir()
+	directory := filepath.Join(root, "0", "servicectl", visionapi.SysvisionDirName)
+	if err := os.MkdirAll(directory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(directory, visionapi.SystemSysvisionSockName)
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	sources := discoverUserSources(root)
+	source := sources[0]
+	if source == nil || source.path != path || source.trustedMode != visionapi.ModeUser || source.trustedUID != 0 {
+		t.Fatalf("sources = %#v", sources)
 	}
 }
 
@@ -154,6 +186,31 @@ func TestReconcileMarksUnknownAndRemovesEmptyStoppedGroup(t *testing.T) {
 	}
 }
 
+func TestReconcileIgnoresNeverTrackedStoppedUnits(t *testing.T) {
+	source := &fakeVisionSource{
+		meta:  visionapi.MetaResponse{VisionEpoch: "epoch-a", Mode: visionapi.ModeSystem},
+		units: make(map[string]visionapi.UnitSnapshot),
+	}
+	for i := 0; i < 285; i++ {
+		name := "stopped-" + strconv.Itoa(i) + ".service"
+		source.units[name] = visionapi.UnitSnapshot{
+			Name: name, Mode: visionapi.ModeSystem, State: "STOPPED",
+			Lifecycle: visionapi.LifecycleStopped, VisionEpoch: "epoch-a", Generation: 1,
+		}
+	}
+	s := newScheduler(schedulerOptions{bootID: "boot-a", proc: newSchedulerProc(), groups: newSchedulerGroups()})
+	if err := s.ReconcileSource(context.Background(), source); err != nil {
+		t.Fatal(err)
+	}
+	units, err := s.ListUnits(context.Background(), cgrouptrack.Scope{Global: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(units) != 0 {
+		t.Fatalf("created %d records for never-tracked stopped units", len(units))
+	}
+}
+
 func TestStatusCountsOnlyAuthorizedScope(t *testing.T) {
 	s := newScheduler(schedulerOptions{bootID: "boot-a", proc: newSchedulerProc(), groups: newSchedulerGroups()})
 	s.units[cgrouptrack.UnitKey{Mode: cgrouptrack.ModeUser, UID: 1000, Unit: "a.service"}] = &unitWork{state: cgrouptrack.StatePending}
@@ -208,6 +265,15 @@ func TestManagedHierarchyPathUsesMountRoot(t *testing.T) {
 	}
 	if got != "/delegated/servicectl" {
 		t.Fatalf("managed path = %q", got)
+	}
+}
+
+func TestVisionQueryUnitNameRemovesCanonicalSuffix(t *testing.T) {
+	if got := visionQueryUnitName("munge.service"); got != "munge" {
+		t.Fatalf("query unit = %q", got)
+	}
+	if got := visionQueryUnitName("already-raw"); got != "already-raw" {
+		t.Fatalf("raw query unit = %q", got)
 	}
 }
 

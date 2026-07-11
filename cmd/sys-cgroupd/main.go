@@ -37,6 +37,7 @@ const (
 
 type config struct {
 	cgroupRoot        string
+	autoMount         bool
 	socketPath        string
 	registryPath      string
 	runtimeRoot       string
@@ -50,10 +51,12 @@ func parseConfig(args []string) (config, error) {
 	fs := flag.NewFlagSet("sys-cgroupd", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	cfg := config{}
+	noAutoMount := false
 	fs.StringVar(&cfg.cgroupRoot, "cgroup-root", defaultCgroupRoot, "managed cgroup v2 root")
 	fs.StringVar(&cfg.socketPath, "socket", defaultSocketPath, "daemon API socket")
 	fs.StringVar(&cfg.registryPath, "registry", defaultRegistry, "runtime registry path")
 	fs.StringVar(&cfg.runtimeRoot, "runtime-root", defaultRuntimeRoot, "user runtime directory root")
+	fs.BoolVar(&noAutoMount, "no-auto-mount", false, "do not mount cgroup2 when it is unavailable")
 	fs.DurationVar(&cfg.settleDelay, "settle-delay", 100*time.Millisecond, "ready-state settle delay")
 	fs.DurationVar(&cfg.reconcileInterval, "reconcile-interval", 30*time.Second, "full reconciliation interval")
 	fs.DurationVar(&cfg.migrationDeadline, "migration-deadline", 250*time.Millisecond, "per-unit migration deadline")
@@ -64,6 +67,7 @@ func parseConfig(args []string) (config, error) {
 	if fs.NArg() != 0 {
 		return config{}, fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
 	}
+	cfg.autoMount = !noAutoMount
 	if cfg.settleDelay < 10*time.Millisecond || cfg.settleDelay > 10*time.Second {
 		return config{}, errors.New("settle delay must be between 10ms and 10s")
 	}
@@ -297,8 +301,8 @@ func (s *scheduler) Stopped(key cgrouptrack.UnitKey, epoch string, generation ui
 	s.mu.Lock()
 	work := s.units[key]
 	if work == nil {
-		work = &unitWork{identity: cgrouptrack.InstanceIdentity{UnitKey: key, BootID: s.bootID, VisionEpoch: epoch, Generation: generation}}
-		s.units[key] = work
+		s.mu.Unlock()
+		return
 	}
 	if work.timer != nil {
 		work.timer.Stop()
@@ -349,6 +353,9 @@ func (s *scheduler) ReconcileSource(ctx context.Context, source VisionSource) er
 		if keyErr != nil {
 			continue
 		}
+		if err := s.migrateLegacyGroup(key); err != nil {
+			return err
+		}
 		seen[key] = true
 		if snapshot.Lifecycle == visionapi.LifecycleReady {
 			s.Ready(source, snapshot)
@@ -372,6 +379,26 @@ func (s *scheduler) ReconcileSource(ctx context.Context, source VisionSource) er
 
 func (s *scheduler) ReconcileGroups(context.Context) error {
 	backend := s.currentGroups()
+	s.mu.Lock()
+	known := make([]cgrouptrack.UnitKey, 0, len(s.units))
+	for key := range s.units {
+		known = append(known, key)
+	}
+	s.mu.Unlock()
+	sort.Slice(known, func(i, j int) bool {
+		if known[i].Mode != known[j].Mode {
+			return known[i].Mode < known[j].Mode
+		}
+		if known[i].UID != known[j].UID {
+			return known[i].UID < known[j].UID
+		}
+		return known[i].Unit < known[j].Unit
+	})
+	for _, key := range known {
+		if err := s.migrateLegacyGroup(key); err != nil {
+			return err
+		}
+	}
 	groups, err := backend.Scan()
 	if err != nil {
 		return err
@@ -412,6 +439,19 @@ func (s *scheduler) ReconcileGroups(context.Context) error {
 	}
 	s.lastReconcile = time.Now().UTC()
 	s.mu.Unlock()
+	return nil
+}
+
+func (s *scheduler) migrateLegacyGroup(key cgrouptrack.UnitKey) error {
+	migrator, ok := s.currentGroups().(interface {
+		MigrateLegacy(cgrouptrack.UnitKey) error
+	})
+	if !ok {
+		return nil
+	}
+	if err := migrator.MigrateLegacy(key); err != nil {
+		return fmt.Errorf("migrate legacy cgroup for %s: %w", key.Unit, err)
+	}
 	return nil
 }
 
@@ -675,10 +715,14 @@ func (s *unixVisionSource) Units(ctx context.Context) ([]visionapi.UnitSnapshot,
 }
 func (s *unixVisionSource) Unit(ctx context.Context, unit string) (visionapi.UnitSnapshot, error) {
 	var snapshot visionapi.UnitSnapshot
-	err := s.request(ctx, "/v1/query/unit/"+url.PathEscape(unit), &snapshot)
+	err := s.request(ctx, "/v1/query/unit/"+url.PathEscape(visionQueryUnitName(unit)), &snapshot)
 	snapshot.Mode = s.trustedMode
 	snapshot.UID = s.trustedUID
 	return snapshot, err
+}
+
+func visionQueryUnitName(unit string) string {
+	return strings.TrimSuffix(unit, ".service")
 }
 func (s *unixVisionSource) Watch(ctx context.Context) (<-chan visionapi.EventEnvelope, error) {
 	transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
@@ -789,7 +833,7 @@ func discoverUserSources(runtimeRoot string) map[uint32]*unixVisionSource {
 			continue
 		}
 		uidValue, err := strconv.ParseUint(entry.Name(), 10, 32)
-		if err != nil || uidValue == 0 || strconv.FormatUint(uidValue, 10) != entry.Name() {
+		if err != nil || strconv.FormatUint(uidValue, 10) != entry.Name() {
 			continue
 		}
 		uid := uint32(uidValue)
@@ -894,30 +938,7 @@ func managedHierarchyPathFromMountInfo(mountinfo, filesystemRoot string) (string
 }
 
 func prepareCgroupRoot(path string) (string, error) {
-	clean := filepath.Clean(path)
-	if clean != defaultCgroupRoot {
-		if _, err := os.Stat(clean); err != nil {
-			return "", err
-		}
-		return clean, nil
-	}
-	mountinfo, err := os.ReadFile("/proc/self/mountinfo")
-	if err != nil {
-		return "", err
-	}
-	self, err := os.ReadFile("/proc/self/cgroup")
-	if err != nil {
-		return "", err
-	}
-	mount, err := unifiedCgroupMount(string(mountinfo), string(self))
-	if err != nil {
-		return "", err
-	}
-	root := filepath.Join(mount, "servicectl.slice")
-	if err := os.Mkdir(root, 0o755); err != nil && !os.IsExist(err) {
-		return "", err
-	}
-	return root, nil
+	return prepareCgroupRootWith(linuxCgroupMountSystem{}, path, true)
 }
 
 func main() {
@@ -934,7 +955,8 @@ func main() {
 		logger.Fatal(err)
 	}
 	proc := cgrouptrack.NewLinuxProcFS("/proc")
-	root, rootErr := prepareCgroupRoot(cfg.cgroupRoot)
+	mountSystem := linuxCgroupMountSystem{}
+	root, rootErr := prepareCgroupRootWith(mountSystem, cfg.cgroupRoot, cfg.autoMount)
 	managedPath := "/"
 	mountinfo, mountErr := os.ReadFile("/proc/self/mountinfo")
 	managedRoot := root
@@ -997,10 +1019,10 @@ func main() {
 			}
 			return
 		case <-hup:
-			tryRecoverGroups(cfg.cgroupRoot, scheduler, logger)
+			tryRecoverGroups(cfg, mountSystem, scheduler, server, logger)
 			_ = scheduler.ReconcileGroups(ctx)
 		case <-reconcile.C:
-			tryRecoverGroups(cfg.cgroupRoot, scheduler, logger)
+			tryRecoverGroups(cfg, mountSystem, scheduler, server, logger)
 			_ = scheduler.ReconcileGroups(ctx)
 		case <-discover.C:
 			found := discoverUserSources(cfg.runtimeRoot)
@@ -1021,14 +1043,14 @@ func main() {
 	}
 }
 
-func tryRecoverGroups(configuredRoot string, scheduler *scheduler, logger *log.Logger) {
+func tryRecoverGroups(cfg config, mountSystem cgroupMountSystem, scheduler *scheduler, server *cgrouptrack.Server, logger *log.Logger) {
 	scheduler.mu.Lock()
 	degraded := scheduler.rootError != ""
 	scheduler.mu.Unlock()
 	if !degraded {
 		return
 	}
-	root, err := prepareCgroupRoot(configuredRoot)
+	root, err := prepareCgroupRootWith(mountSystem, cfg.cgroupRoot, cfg.autoMount)
 	if err != nil {
 		return
 	}
@@ -1036,7 +1058,18 @@ func tryRecoverGroups(configuredRoot string, scheduler *scheduler, logger *log.L
 	if err != nil {
 		return
 	}
+	mountinfo, err := os.ReadFile(procSelfMountInfo)
+	if err != nil {
+		groups.Close()
+		return
+	}
+	managedPath, err := managedHierarchyPathFromMountInfo(string(mountinfo), root)
+	if err != nil {
+		groups.Close()
+		return
+	}
 	scheduler.ReplaceGroups(groups)
+	server.SetManagedCgroupPath(managedPath)
 	logger.Printf("cgroup root recovered at %s", root)
 }
 

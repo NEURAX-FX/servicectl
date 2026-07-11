@@ -67,10 +67,16 @@ func s6BundleName() string {
 }
 
 func s6SysvisiondServiceName() string {
+	if userMode() {
+		return "sysvisiond-user-" + currentUID()
+	}
 	return "sysvisiond"
 }
 
 func s6ServicectlAPIServiceName() string {
+	if userMode() {
+		return "servicectl-api-user-" + currentUID()
+	}
 	return "servicectl-api"
 }
 
@@ -192,7 +198,7 @@ func ensureServicectlAPISource() error {
 	}
 	runLine := servicectlBinaryPath()
 	if userMode() {
-		runLine += " --user"
+		runLine = "/usr/bin/env XDG_RUNTIME_DIR=" + runtimeDir() + " " + runLine + " --user"
 	}
 	runLine += " serve-api"
 	runScript := strings.Join([]string{"#!/usr/bin/execlineb -P", runLine, ""}, "\n")
@@ -212,7 +218,7 @@ func ensureSysvisiondSource() error {
 	}
 	runLine := sysvisiondBinaryPath() + " --mode=system"
 	if userMode() {
-		runLine = sysvisiondBinaryPath() + " --mode=user"
+		runLine = "/usr/bin/env XDG_RUNTIME_DIR=" + runtimeDir() + " " + sysvisiondBinaryPath() + " --mode=user"
 	}
 	runScript := strings.Join([]string{"#!/usr/bin/execlineb -P", runLine, ""}, "\n")
 	if err := os.WriteFile(filepath.Join(serviceDir, "run"), []byte(runScript), 0755); err != nil {
@@ -355,6 +361,9 @@ func enabledStandaloneServicesFromS6Bundle() []string {
 		if !strings.HasSuffix(entry, "-orchestrd") || strings.HasPrefix(entry, "group-") {
 			continue
 		}
+		if !s6OwnerMatchesCurrentMode(filepath.Join(s6SourceRoot(), entry)) {
+			continue
+		}
 		service := strings.TrimSuffix(entry, "-orchestrd") + ".service"
 		if normalized := normalizeServiceUnitName(service); normalized != "" {
 			services = append(services, normalized)
@@ -428,6 +437,9 @@ func refreshS6OrchestrdDependencies() error {
 		if info, statErr := os.Stat(serviceDir); statErr != nil || !info.IsDir() {
 			continue
 		}
+		if !s6OwnerMatchesCurrentMode(serviceDir) {
+			continue
+		}
 		deps := append([]string{}, baseDeps...)
 		for dep := range projected[owner] {
 			deps = append(deps, dep)
@@ -442,6 +454,15 @@ func refreshS6OrchestrdDependencies() error {
 		}
 	}
 	return nil
+}
+
+func s6OwnerMatchesCurrentMode(serviceDir string) bool {
+	run, err := os.ReadFile(filepath.Join(serviceDir, "run"))
+	if err != nil {
+		return false
+	}
+	isUser := strings.Contains(string(run), "sys-orchestrd --user ")
+	return isUser == userMode()
 }
 
 func validateS6Sources() error {

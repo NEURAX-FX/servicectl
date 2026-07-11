@@ -29,6 +29,7 @@ func TestParseCgroupCommands(t *testing.T) {
 	}{
 		{[]string{"status"}, false, 0, cgrouptrack.Request{Operation: cgrouptrack.OpStatus}},
 		{[]string{"status"}, true, 1000, cgrouptrack.Request{Operation: cgrouptrack.OpStatus, Mode: cgrouptrack.ModeUser, UID: 1000}},
+		{[]string{"status"}, true, 0, cgrouptrack.Request{Operation: cgrouptrack.OpStatus, Mode: cgrouptrack.ModeUser, UID: 0}},
 		{[]string{"list"}, false, 0, cgrouptrack.Request{Operation: cgrouptrack.OpListUnits, Mode: cgrouptrack.ModeSystem}},
 		{[]string{"list"}, true, 1000, cgrouptrack.Request{Operation: cgrouptrack.OpListUnits, Mode: cgrouptrack.ModeUser, UID: 1000}},
 		{[]string{"inspect", "demo"}, false, 0, cgrouptrack.Request{Operation: cgrouptrack.OpGetUnit, Mode: cgrouptrack.ModeSystem, Unit: "demo.service"}},

@@ -152,9 +152,16 @@ system plane or another user's subtree is rejected.
 
 The default managed root is `/sys/fs/cgroup/servicectl.slice`. On hosts where
 an outer manager owns that location, start `sys-cgroupd` with an existing
-writable delegated root using `--cgroup-root`. The daemon does not mount
-cgroup2, enable controllers, freeze processes, send signals, or write
-`cgroup.kill`.
+writable delegated root using `--cgroup-root`. If no cgroup2 mount is visible,
+the daemon safely mounts cgroup2 at `/sys/fs/cgroup` only when that path is a
+real empty directory. Use `--no-auto-mount` to disable this behavior. The daemon
+never remounts or unmounts cgroup2, mounts over existing content, enables
+controllers, freezes processes, sends signals, or writes `cgroup.kill`.
+
+Service leaf directories use readable service stems. For example,
+`demo.service` maps to `system/demo`, and a root user service maps to
+`user/0/demo`. Existing Base64-named leaves from earlier builds are migrated
+during reconciliation without killing their member processes.
 
 ## Test
 
@@ -206,6 +213,10 @@ System mode:
 User mode:
 
 - `/run/user/<uid>/servicectl`
-- shared `/s6/rc` graph with user-mode daemons started via `--user`
+- shared `/s6/rc` graph with UID-qualified `sysvisiond-user-<uid>` and
+  `servicectl-api-user-<uid>` infrastructure services
 
-The user runtime path is based on `/run/user/<uid>` semantics, not `XDG_RUNTIME_DIR` semantics. The s6 source graph is shared; system/user differences live in the daemon arguments and runtime socket paths rather than separate s6 source trees.
+The user runtime path is based on `/run/user/<uid>` semantics. Generated user
+s6 run scripts set that path explicitly as `XDG_RUNTIME_DIR`; system and user
+event planes have distinct infrastructure service names even though the s6
+source graph is shared.

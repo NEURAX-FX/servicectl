@@ -168,20 +168,7 @@ func (f *LinuxCgroupFS) pidsLocked(key UnitKey) ([]int, error) {
 	if err != nil {
 		return nil, err
 	}
-	seen := make(map[int]struct{})
-	for _, field := range strings.Fields(string(data)) {
-		pid, err := strconv.Atoi(field)
-		if err != nil || pid <= 0 {
-			return nil, fmt.Errorf("invalid PID %q in cgroup.procs", field)
-		}
-		seen[pid] = struct{}{}
-	}
-	pids := make([]int, 0, len(seen))
-	for pid := range seen {
-		pids = append(pids, pid)
-	}
-	sort.Ints(pids)
-	return pids, nil
+	return parsePIDs(data)
 }
 
 func (f *LinuxCgroupFS) RemoveIfEmpty(key UnitKey) (bool, error) {
@@ -222,6 +209,84 @@ func (f *LinuxCgroupFS) RemoveIfEmpty(key UnitKey) (bool, error) {
 	return true, nil
 }
 
+func (f *LinuxCgroupFS) MigrateLegacy(key UnitKey) error {
+	components, err := groupComponents(key)
+	if err != nil {
+		return err
+	}
+	legacy, err := legacyGroupComponents(key)
+	if err != nil {
+		return err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	parent, err := f.openParentLocked(components)
+	if err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			return nil
+		}
+		return err
+	}
+	defer unix.Close(parent)
+	if err := unix.Renameat2(parent, legacy[len(legacy)-1], parent, components[len(components)-1], unix.RENAME_NOREPLACE); err == nil {
+		return nil
+	} else if errors.Is(err, unix.ENOENT) {
+		return nil
+	} else if !errors.Is(err, unix.EEXIST) {
+		return err
+	}
+	pids, err := f.pidsAtComponentsLocked(legacy)
+	if err != nil {
+		if errors.Is(err, unix.ENOENT) || os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	leaf, err := f.openGroupLocked(key)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(leaf)
+	if f.synthetic {
+		current, err := f.pidsLocked(key)
+		if err != nil {
+			return err
+		}
+		all := append(current, pids...)
+		sort.Ints(all)
+		all = compactPIDs(all)
+		data := make([]byte, 0, len(all)*8)
+		for _, pid := range all {
+			data = strconv.AppendInt(data, int64(pid), 10)
+			data = append(data, '\n')
+		}
+		if err := os.WriteFile(filepath.Join(f.root, filepath.Join(components...), "cgroup.procs"), data, 0o644); err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(f.root, filepath.Join(legacy...), "cgroup.procs"), nil, 0o644); err != nil {
+			return err
+		}
+	} else {
+		for _, pid := range pids {
+			if err := writePIDAt(leaf, pid); err != nil {
+				return err
+			}
+		}
+	}
+	remaining, err := f.pidsAtComponentsLocked(legacy)
+	if err != nil && !errors.Is(err, unix.ENOENT) && !os.IsNotExist(err) {
+		return err
+	}
+	if len(remaining) != 0 {
+		return errors.New("legacy cgroup remained populated after migration")
+	}
+	if f.synthetic {
+		legacyPath := append([]string{f.root}, legacy...)
+		_ = os.Remove(filepath.Join(append(legacyPath, "cgroup.procs")...))
+	}
+	return unix.Unlinkat(parent, legacy[len(legacy)-1], unix.AT_REMOVEDIR)
+}
+
 func (f *LinuxCgroupFS) Scan() ([]GroupSnapshot, error) {
 	groups := make([]GroupSnapshot, 0)
 	systemEntries, err := os.ReadDir(filepath.Join(f.root, "system"))
@@ -232,7 +297,7 @@ func (f *LinuxCgroupFS) Scan() ([]GroupSnapshot, error) {
 		if !entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
 			continue
 		}
-		key, err := DecodeUnit(ModeSystem, 0, entry.Name())
+		key, err := DecodeUnitDirectory(ModeSystem, 0, entry.Name())
 		if err != nil {
 			continue
 		}
@@ -251,7 +316,7 @@ func (f *LinuxCgroupFS) Scan() ([]GroupSnapshot, error) {
 			continue
 		}
 		uid, err := strconv.ParseUint(uidEntry.Name(), 10, 32)
-		if err != nil || uid == 0 || strconv.FormatUint(uid, 10) != uidEntry.Name() {
+		if err != nil || strconv.FormatUint(uid, 10) != uidEntry.Name() {
 			continue
 		}
 		unitEntries, err := os.ReadDir(filepath.Join(f.root, "user", uidEntry.Name()))
@@ -262,7 +327,7 @@ func (f *LinuxCgroupFS) Scan() ([]GroupSnapshot, error) {
 			if !entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
 				continue
 			}
-			key, err := DecodeUnit(ModeUser, uint32(uid), entry.Name())
+			key, err := DecodeUnitDirectory(ModeUser, uint32(uid), entry.Name())
 			if err != nil {
 				continue
 			}
@@ -296,14 +361,25 @@ func (f *LinuxCgroupFS) Path(key UnitKey) string {
 func (f *LinuxCgroupFS) Root() string { return f.root }
 
 func groupComponents(key UnitKey) ([]string, error) {
-	encoded, err := key.EncodedUnit()
+	directory, err := key.DirectoryName()
 	if err != nil {
 		return nil, err
 	}
 	if key.Mode == ModeSystem {
-		return []string{"system", encoded}, nil
+		return []string{"system", directory}, nil
 	}
-	return []string{"user", strconv.FormatUint(uint64(key.UID), 10), encoded}, nil
+	return []string{"user", strconv.FormatUint(uint64(key.UID), 10), directory}, nil
+}
+
+func legacyGroupComponents(key UnitKey) ([]string, error) {
+	directory, err := legacyUnitDirectory(key)
+	if err != nil {
+		return nil, err
+	}
+	if key.Mode == ModeSystem {
+		return []string{"system", directory}, nil
+	}
+	return []string{"user", strconv.FormatUint(uint64(key.UID), 10), directory}, nil
 }
 
 func (f *LinuxCgroupFS) ensureComponentsLocked(components []string) (int, error) {
@@ -344,6 +420,84 @@ func (f *LinuxCgroupFS) openGroupLocked(key UnitKey) (int, error) {
 		current = next
 	}
 	return current, nil
+}
+
+func (f *LinuxCgroupFS) pidsAtComponentsLocked(components []string) ([]int, error) {
+	current, err := duplicateFD(f.rootFD)
+	if err != nil {
+		return nil, err
+	}
+	for _, component := range components {
+		next, openErr := openBeneath(current, component, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+		unix.Close(current)
+		if openErr != nil {
+			return nil, openErr
+		}
+		current = next
+	}
+	defer unix.Close(current)
+	fd, err := openBeneath(current, "cgroup.procs", unix.O_RDONLY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	file := os.NewFile(uintptr(fd), "cgroup.procs")
+	if file == nil {
+		unix.Close(fd)
+		return nil, errors.New("open cgroup.procs")
+	}
+	defer file.Close()
+	data, err := readLimited(file, 8<<20)
+	if err != nil {
+		return nil, err
+	}
+	return parsePIDs(data)
+}
+
+func writePIDAt(leaf int, pid int) error {
+	fd, err := openBeneath(leaf, "cgroup.procs", unix.O_WRONLY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return err
+	}
+	file := os.NewFile(uintptr(fd), "cgroup.procs")
+	if file == nil {
+		unix.Close(fd)
+		return errors.New("open cgroup.procs")
+	}
+	defer file.Close()
+	_, err = file.WriteString(strconv.Itoa(pid) + "\n")
+	return err
+}
+
+func parsePIDs(data []byte) ([]int, error) {
+	seen := make(map[int]struct{})
+	for _, field := range strings.Fields(string(data)) {
+		pid, err := strconv.Atoi(field)
+		if err != nil || pid <= 0 {
+			return nil, fmt.Errorf("invalid PID %q in cgroup.procs", field)
+		}
+		seen[pid] = struct{}{}
+	}
+	pids := make([]int, 0, len(seen))
+	for pid := range seen {
+		pids = append(pids, pid)
+	}
+	sort.Ints(pids)
+	return pids, nil
+}
+
+func compactPIDs(pids []int) []int {
+	if len(pids) < 2 {
+		return pids
+	}
+	write := 1
+	for read := 1; read < len(pids); read++ {
+		if pids[read] == pids[write-1] {
+			continue
+		}
+		pids[write] = pids[read]
+		write++
+	}
+	return pids[:write]
 }
 
 func (f *LinuxCgroupFS) openParentLocked(components []string) (int, error) {

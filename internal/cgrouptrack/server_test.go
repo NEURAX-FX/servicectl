@@ -51,6 +51,35 @@ func TestAuthorizeRejectsDifferentPIDNamespace(t *testing.T) {
 	}
 }
 
+func TestAuthorizeAllowsUnknownPIDNamespaceButStillEnforcesUID(t *testing.T) {
+	known := FileIdentity{Device: 1, Inode: 2}
+	proc := &authProc{
+		processes: map[int]Process{
+			42: {PID: 42, UID: 1001, StartTime: 100, Cgroup: "/untracked"},
+		},
+	}
+	for _, namespaces := range []struct {
+		peer   FileIdentity
+		daemon FileIdentity
+	}{
+		{peer: FileIdentity{}, daemon: known},
+		{peer: known, daemon: FileIdentity{}},
+	} {
+		peer := Peer{PID: 40, UID: 1000, PIDNamespace: namespaces.peer}
+		if _, err := authorizeRequest(peer, Request{Operation: OpListUnits, Mode: ModeUser, UID: 1000}, namespaces.daemon, proc); err != nil {
+			t.Fatal(err)
+		}
+	}
+	peer := Peer{PID: 40, UID: 1000}
+	if _, err := authorizeRequest(peer, Request{Operation: OpListUnits, Mode: ModeUser, UID: 1001}, FileIdentity{}, proc); !errors.Is(err, ErrAccessDenied) {
+		t.Fatalf("cross-UID error = %v", err)
+	}
+	request := Request{Operation: OpAttach, Mode: ModeUser, UID: 1000, Unit: "demo.service", PID: 42}
+	if _, err := authorizeRequest(peer, request, FileIdentity{}, proc); !errors.Is(err, ErrAccessDenied) {
+		t.Fatalf("cross-UID attach error = %v", err)
+	}
+}
+
 func TestAuthorizeUserAttachOwnershipAndCgroupBoundary(t *testing.T) {
 	proc := &authProc{
 		namespace: FileIdentity{Device: 1, Inode: 2},
@@ -87,12 +116,24 @@ func TestManagedProcessScopeSupportsHierarchyRoot(t *testing.T) {
 	if !managed || mode != ModeUser || uid != 1000 {
 		t.Fatalf("mode=%q uid=%d managed=%v", mode, uid, managed)
 	}
+	mode, uid, managed = managedProcessScope("/user/0/demo", "/")
+	if !managed || mode != ModeUser || uid != 0 {
+		t.Fatalf("root user mode=%q uid=%d managed=%v", mode, uid, managed)
+	}
 }
 
 func TestServerPreservesExplicitHierarchyRoot(t *testing.T) {
 	server := NewServer(ServerOptions{ManagedCgroupPath: "/"})
 	if server.managedPath != "/" {
 		t.Fatalf("managed path = %q", server.managedPath)
+	}
+}
+
+func TestServerUpdatesManagedHierarchyRoot(t *testing.T) {
+	server := NewServer(ServerOptions{ManagedCgroupPath: "/old"})
+	server.SetManagedCgroupPath("/new/")
+	if got := server.managedCgroupPath(); got != "/new" {
+		t.Fatalf("managed path = %q", got)
 	}
 }
 
@@ -115,6 +156,38 @@ func TestServerClientRoundTrip(t *testing.T) {
 
 	client := NewClient(path)
 	response, err := client.Do(context.Background(), Request{Operation: OpStatus})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !response.OK || response.Status == nil || response.Status.CgroupRoot != "/test" {
+		t.Fatalf("response = %#v", response)
+	}
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("server did not stop")
+	}
+}
+
+func TestServerClientRoundTripWithoutVisiblePIDNamespaces(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sys-cgroupd.sock")
+	proc := &authProc{
+		pidNamespaceErr:  os.ErrNotExist,
+		selfNamespaceErr: os.ErrNotExist,
+	}
+	service := &fakeProtocolService{status: DaemonStatus{Healthy: true, CgroupRoot: "/test"}}
+	server := NewServer(ServerOptions{Path: path, Service: service, Proc: proc, RequestTimeout: time.Second})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() { errCh <- server.Serve(ctx) }()
+	waitForServerSocket(t, path)
+
+	response, err := NewClient(path).Do(context.Background(), Request{Operation: OpStatus})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,8 +234,10 @@ func TestServerPerUIDAndAttachLimits(t *testing.T) {
 }
 
 type authProc struct {
-	namespace FileIdentity
-	processes map[int]Process
+	namespace        FileIdentity
+	pidNamespaceErr  error
+	selfNamespaceErr error
+	processes        map[int]Process
 }
 
 func (p *authProc) Inspect(pid int) (Process, error) {
@@ -173,14 +248,18 @@ func (p *authProc) Inspect(pid int) (Process, error) {
 	process.PIDFD = -1
 	return process, nil
 }
-func (p *authProc) PIDNamespace(int) (FileIdentity, error)  { return p.namespace, nil }
-func (p *authProc) SelfPIDNamespace() (FileIdentity, error) { return p.namespace, nil }
-func (p *authProc) ReadStat(int) (procinfo.Stat, error)     { panic("unused") }
-func (p *authProc) ReadStatus(int) (ProcStatus, error)      { panic("unused") }
-func (p *authProc) ReadCgroup(int) (string, error)          { panic("unused") }
-func (p *authProc) ReadExecutable(int) (string, error)      { panic("unused") }
-func (p *authProc) ListPIDs() ([]int, error)                { panic("unused") }
-func (p *authProc) OpenPIDFD(int) (int, error)              { panic("unused") }
+func (p *authProc) PIDNamespace(int) (FileIdentity, error) {
+	return p.namespace, p.pidNamespaceErr
+}
+func (p *authProc) SelfPIDNamespace() (FileIdentity, error) {
+	return p.namespace, p.selfNamespaceErr
+}
+func (p *authProc) ReadStat(int) (procinfo.Stat, error) { panic("unused") }
+func (p *authProc) ReadStatus(int) (ProcStatus, error)  { panic("unused") }
+func (p *authProc) ReadCgroup(int) (string, error)      { panic("unused") }
+func (p *authProc) ReadExecutable(int) (string, error)  { panic("unused") }
+func (p *authProc) ListPIDs() ([]int, error)            { panic("unused") }
+func (p *authProc) OpenPIDFD(int) (int, error)          { panic("unused") }
 
 type fakeProtocolService struct {
 	status DaemonStatus

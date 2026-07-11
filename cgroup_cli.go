@@ -24,7 +24,7 @@ func cgroupCommand(args []string) int {
 	uid := uint32(0)
 	if userMode() {
 		euid := os.Geteuid()
-		if euid <= 0 || uint64(euid) > uint64(^uint32(0)) {
+		if euid < 0 || uint64(euid) > uint64(^uint32(0)) {
 			fmt.Printf("invalid user UID %d\n", euid)
 			return 1
 		}
@@ -57,9 +57,6 @@ func parseCgroupCommand(args []string, user bool, uid uint32) (cgrouptrack.Reque
 	mode := cgrouptrack.ModeSystem
 	requestUID := uint32(0)
 	if user {
-		if uid == 0 {
-			return cgrouptrack.Request{}, errors.New("user mode requires a nonzero UID")
-		}
 		mode = cgrouptrack.ModeUser
 		requestUID = uid
 	}

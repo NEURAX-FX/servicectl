@@ -240,6 +240,11 @@ The `sys-cgroupd` tmpfiles entry creates only a root-owned runtime directory.
 It does not create `/sys/fs/cgroup/servicectl.slice`, migrate a process, enable
 a cgroup controller, or start the daemon. The packaged Dinit definition is
 available for explicit operator startup and has no RPM scriptlet activation.
+When the explicitly started daemon finds no visible cgroup2 mount, its default
+runtime policy may safely mount cgroup2 at `/sys/fs/cgroup` only when that path
+is a real empty directory. It never remounts or unmounts cgroup2, mounts over
+existing content, or enables controllers. Administrators can add
+`--no-auto-mount` to the local Dinit command.
 
 ### Mutable D-Bus activation files
 
@@ -408,6 +413,8 @@ Scriptlets are intentionally minimal:
 - `%post` runs `systemd-tmpfiles --create servicectl.conf` when available.
 - No scriptlet starts, stops, enables, or reloads dinit, s6, servicectl, D-Bus,
   `sys-cgroupd`, or systemd services.
+- No scriptlet or tmpfiles rule mounts cgroup2; safe auto-mount is a daemon
+  startup policy only.
 - No scriptlet modifies PID 1, kernel command lines, initramfs, alternatives,
   or `/sbin/init`.
 - Uninstall removes only RPM-owned files. Runtime state in `/var/lib` follows

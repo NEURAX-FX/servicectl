@@ -18,7 +18,7 @@ func TestCgroupFSOnlyWritesProcs(t *testing.T) {
 	if err := fs.Ensure(key); err != nil {
 		t.Fatal(err)
 	}
-	procs := filepath.Join(root, "system", mustEncoded(t, key), "cgroup.procs")
+	procs := filepath.Join(root, "system", "demo", "cgroup.procs")
 	if err := os.WriteFile(procs, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +52,7 @@ func TestCgroupFSUserPathAndPIDListing(t *testing.T) {
 	if err := fs.Ensure(key); err != nil {
 		t.Fatal(err)
 	}
-	procs := filepath.Join(root, "user", "1000", mustEncoded(t, key), "cgroup.procs")
+	procs := filepath.Join(root, "user", "1000", "demo", "cgroup.procs")
 	if err := os.WriteFile(procs, []byte("20\n3\n20\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -63,8 +63,31 @@ func TestCgroupFSUserPathAndPIDListing(t *testing.T) {
 	if !reflect.DeepEqual(pids, []int{3, 20}) {
 		t.Fatalf("pids = %#v", pids)
 	}
-	if got := fs.Path(key); got != filepath.Join(root, "user", "1000", mustEncoded(t, key)) {
+	if got := fs.Path(key); got != filepath.Join(root, "user", "1000", "demo") {
 		t.Fatalf("path = %q", got)
+	}
+}
+
+func TestCgroupFSScansRootUserPlane(t *testing.T) {
+	root := t.TempDir()
+	fs, err := openCgroupFS(root, skipMagicCheck)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fs.Close()
+	key := UnitKey{Mode: ModeUser, UID: 0, Unit: "demo.service"}
+	if err := fs.Ensure(key); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fs.Path(key), "cgroup.procs"), []byte("42\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	groups, err := fs.Scan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups) != 1 || groups[0].Key != key || !reflect.DeepEqual(groups[0].PIDs, []int{42}) {
+		t.Fatalf("groups = %#v", groups)
 	}
 }
 
@@ -120,11 +143,79 @@ func TestCgroupFSScanIgnoresMalformedDirectories(t *testing.T) {
 	}
 }
 
-func mustEncoded(t *testing.T, key UnitKey) string {
-	t.Helper()
-	encoded, err := key.EncodedUnit()
+func TestCgroupFSMigratesLegacyDirectory(t *testing.T) {
+	root := t.TempDir()
+	fs, err := openCgroupFS(root, skipMagicCheck)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return encoded
+	defer fs.Close()
+	key := UnitKey{Mode: ModeSystem, Unit: "demo.service"}
+	legacy, err := legacyUnitDirectory(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyPath := filepath.Join(root, "system", legacy)
+	if err := os.MkdirAll(legacyPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(legacyPath, "cgroup.procs"), []byte("42\n43\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := fs.MigrateLegacy(key); err != nil {
+		t.Fatal(err)
+	}
+	groups, err := fs.Scan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups) != 1 || groups[0].Key != key || !reflect.DeepEqual(groups[0].PIDs, []int{42, 43}) {
+		t.Fatalf("groups = %#v", groups)
+	}
+	if _, err := os.Stat(legacyPath); !os.IsNotExist(err) {
+		t.Fatalf("legacy path still exists: %v", err)
+	}
+	if got := fs.Path(key); got != filepath.Join(root, "system", "demo") {
+		t.Fatalf("path = %q", got)
+	}
+}
+
+func TestCgroupFSMergesLegacyDirectoryIntoReadableDirectory(t *testing.T) {
+	root := t.TempDir()
+	fs, err := openCgroupFS(root, skipMagicCheck)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fs.Close()
+	key := UnitKey{Mode: ModeSystem, Unit: "demo.service"}
+	if err := fs.Ensure(key); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fs.Path(key), "cgroup.procs"), []byte("41\n42\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := legacyUnitDirectory(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyPath := filepath.Join(root, "system", legacy)
+	if err := os.MkdirAll(legacyPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(legacyPath, "cgroup.procs"), []byte("42\n43\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := fs.MigrateLegacy(key); err != nil {
+		t.Fatal(err)
+	}
+	pids, err := fs.PIDs(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(pids, []int{41, 42, 43}) {
+		t.Fatalf("pids = %#v", pids)
+	}
+	if _, err := os.Stat(legacyPath); !os.IsNotExist(err) {
+		t.Fatalf("legacy path still exists: %v", err)
+	}
 }
