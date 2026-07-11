@@ -260,6 +260,8 @@ An attach succeeds only when:
 - its epoch and generation remain unchanged through the operation
 - the PID exists, is not a kernel thread or zombie, and has stable identity
 - a user caller owns the PID and targets only its own user plane
+- a user caller does not move a PID out of the system plane or another UID's
+  servicectl cgroup
 - a system-plane request comes from UID 0
 - post-write verification observes the PID in the target cgroup
 
@@ -335,8 +337,9 @@ UID, command name, and MainPID status. Full process arguments and environment
 are not displayed by default.
 
 `attach` is the only write operation. The CLI always uses the daemon API and
-never writes cgroupfs directly. JSON output follows existing global output
-conventions.
+never writes cgroupfs directly. The first release uses human-readable CLI
+output; machine consumers use the structured daemon API until servicectl gains
+a repository-wide machine-output convention.
 
 ## Reconciliation and Recovery
 
