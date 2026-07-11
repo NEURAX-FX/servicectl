@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"servicectl/internal/visionapi"
 )
 
 type fakeSyslog struct {
@@ -233,6 +235,30 @@ func TestTypedNilSyslogWriterDoesNotPanic(t *testing.T) {
 
 	d.recordAttemptFailure(&operationError{Executor: "servicectl", Action: "start", Target: "slurmctld.service", Err: io.EOF})
 	d.recordAttemptSuccess("initial-start")
+}
+
+func TestHandleNotifydDBusRuntimeEventMarksUnitRunning(t *testing.T) {
+	tmp := t.TempDir()
+	d := &daemon{
+		logger:      log.New(io.Discard, "", 0),
+		stateFile:   filepath.Join(tmp, "state"),
+		serviceName: "systemd-hostnamed-orchestrd",
+		unit:        "systemd-hostnamed.service",
+	}
+
+	err := d.handleEvent(visionapi.NewEvent(visionapi.ModeSystem, visionapi.SourceSysNotifyd, visionapi.KindUnitRuntime, "systemd-hostnamed", map[string]string{
+		"phase":       "ready",
+		"child_state": "running",
+		"bus_name":    "org.freedesktop.hostname1",
+	}))
+	if err != nil {
+		t.Fatalf("handleEvent returned error: %v", err)
+	}
+
+	content := readTextFile(t, d.stateFile)
+	if !strings.Contains(content, "state=running") {
+		t.Fatalf("expected notifyd D-Bus runtime event to mark unit running, got %q", content)
+	}
 }
 
 func readTextFile(t *testing.T, path string) string {

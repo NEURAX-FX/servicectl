@@ -228,6 +228,9 @@ func notifySocketPath(unitName string, unit *Unit, socketUnit *SocketUnit) strin
 	if mode == managedDirect {
 		return ""
 	}
+	if !strings.EqualFold(unit.Type, "notify") {
+		return ""
+	}
 	return managedNotifySocketPath(unitName, mode)
 }
 

@@ -231,7 +231,7 @@ func (d *daemon) handleEvent(event visionapi.EventEnvelope) error {
 		if failure != "" {
 			d.writeState("failed", failure)
 			d.publishState("failed", failure)
-			d.logError("notifyd reported failure unit=%s detail=%s", d.unit, failure)
+			d.logError("%s reported failure unit=%s detail=%s", event.Source, d.unit, failure)
 			return nil
 		}
 		if phase == "ready" || child == "running" {

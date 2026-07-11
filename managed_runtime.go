@@ -23,6 +23,14 @@ func managedNotifySocketPath(name string, mode managedServiceMode) string {
 	return filepath.Join(managedRuntimeServiceDir(name, mode), "notify.sock")
 }
 
+func managedDBusTriggerPath(name string, mode managedServiceMode) string {
+	return filepath.Join(managedRuntimeServiceDir(name, mode), "dbus.trigger")
+}
+
+func managedControlPath(name string, mode managedServiceMode) string {
+	return filepath.Join(managedRuntimeServiceDir(name, mode), "control.sock")
+}
+
 func ensureManagedRuntimeDir(name string, mode managedServiceMode, unit *Unit) error {
 	dir := managedRuntimeServiceDir(name, mode)
 	if err := os.MkdirAll(dir, 0o755); err != nil {

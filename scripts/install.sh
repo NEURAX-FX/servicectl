@@ -15,6 +15,7 @@ Usage: scripts/install.sh [--prefix DIR] [--bindir DIR] [--system] [--also-syste
 Installs:
   - servicectl
   - sys-notifyd
+  - sys-dbusd
   - sys-logd
   - sys-propertyd
   - sysvisiond
@@ -101,8 +102,12 @@ fi
 build_and_install() {
   local output_name="$1"
   local package_path="$2"
+  local -a build_args=()
+  if [[ "$output_name" == "servicectl" && ( "$SYSTEM_MODE" -eq 1 || "$INSTALL_SYSTEM_COPY" -eq 1 ) ]]; then
+    build_args=(-ldflags '-X main.dbusActivationHelperPath=/usr/local/libexec/servicectl/sys-dbusd-daemon-helper')
+  fi
   printf 'Building %s\n' "$output_name"
-  go build -o "$BINDIR/$output_name" "$package_path"
+  go build "${build_args[@]}" -o "$BINDIR/$output_name" "$package_path"
   if [[ "$INSTALL_SYSTEM_COPY" -eq 1 ]]; then
     install -m 0755 "$BINDIR/$output_name" "$SYSTEM_BINDIR/$output_name"
   fi
@@ -110,14 +115,36 @@ build_and_install() {
 
 build_and_install servicectl "$ROOT"
 build_and_install sys-notifyd "$ROOT/cmd/sys-notifyd"
+build_and_install sys-dbusd "$ROOT/cmd/sys-dbusd"
 build_and_install sys-logd "$ROOT/cmd/sys-logd"
 build_and_install sys-propertyd "$ROOT/cmd/sys-propertyd"
 build_and_install sysvisiond "$ROOT/cmd/sysvisiond"
 build_and_install sys-orchestrd "$ROOT/cmd/sys-orchestrd"
 
+if [[ "$SYSTEM_MODE" -eq 1 || "$INSTALL_SYSTEM_COPY" -eq 1 ]]; then
+  printf 'Building sys-dbusd-daemon-helper\n'
+  make -C "$ROOT/cmd/sys-dbusd-daemon-helper" clean all
+  install -d -m 0755 /usr/local/libexec/servicectl
+  install -m 4750 -o root -g dbus "$ROOT/cmd/sys-dbusd-daemon-helper/sys-dbusd-daemon-helper" /usr/local/libexec/servicectl/sys-dbusd-daemon-helper
+  install -d -m 0755 /usr/local/lib/servicectl/dbus-activation /etc/dinit.d
+  printf '%s\n' \
+    '<busconfig>' \
+    '  <servicehelper>/usr/local/libexec/servicectl/sys-dbusd-daemon-helper</servicehelper>' \
+    '</busconfig>' > /usr/local/lib/servicectl/dbus-activation/50-servicectl-activation.conf
+  chmod 0644 /usr/local/lib/servicectl/dbus-activation/50-servicectl-activation.conf
+  printf '%s\n' \
+    '# servicectl D-Bus activation coordinator' \
+    'type = process' \
+    'command = /usr/local/bin/sys-dbusd -helper-path /usr/local/libexec/servicectl/sys-dbusd-daemon-helper -admin-path /usr/local/bin/servicectl -servicectl-path /usr/local/bin/servicectl -dinitctl-path /bin/dinitctl' \
+    'restart = true' \
+    'smooth-recovery = true' \
+    'log-type = buffer' > /etc/dinit.d/sys-dbusd
+fi
+
 printf '\nInstalled binaries:\n'
 printf '  %s\n' "$BINDIR/servicectl"
 printf '  %s\n' "$BINDIR/sys-notifyd"
+printf '  %s\n' "$BINDIR/sys-dbusd"
 printf '  %s\n' "$BINDIR/sys-logd"
 printf '  %s\n' "$BINDIR/sys-propertyd"
 printf '  %s\n' "$BINDIR/sysvisiond"
@@ -125,6 +152,7 @@ printf '  %s\n' "$BINDIR/sys-orchestrd"
 if [[ "$INSTALL_SYSTEM_COPY" -eq 1 ]]; then
   printf '  %s\n' "$SYSTEM_BINDIR/servicectl"
   printf '  %s\n' "$SYSTEM_BINDIR/sys-notifyd"
+  printf '  %s\n' "$SYSTEM_BINDIR/sys-dbusd"
   printf '  %s\n' "$SYSTEM_BINDIR/sys-logd"
   printf '  %s\n' "$SYSTEM_BINDIR/sys-propertyd"
   printf '  %s\n' "$SYSTEM_BINDIR/sysvisiond"

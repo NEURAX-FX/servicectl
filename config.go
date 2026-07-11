@@ -14,6 +14,7 @@ type Config struct {
 	DinitServiceDir   string
 	DinitGenDir       string
 	ManagedRuntimeDir string
+	DBusServiceDir    string
 	UnitExtraDir      string
 	IsRoot            bool
 }
@@ -43,6 +44,7 @@ func buildConfig(userMode bool) Config {
 		cfg.DinitServiceDir = filepath.Join(home, ".config/dinit.d")
 		cfg.DinitGenDir = filepath.Join(xdgRuntimeDir, "dinit.d/generated")
 		cfg.ManagedRuntimeDir = filepath.Join(runtimeDir(), "servicectl/managed")
+		cfg.DBusServiceDir = filepath.Join(home, ".local/share/dbus-1/services")
 		cfg.UnitExtraDir = filepath.Join(home, ".config/servicectl/unitextra")
 		return cfg
 	}
@@ -55,6 +57,7 @@ func buildConfig(userMode bool) Config {
 	cfg.DinitServiceDir = "/etc/dinit.d"
 	cfg.DinitGenDir = "/run/dinit.d/generated"
 	cfg.ManagedRuntimeDir = "/run/servicectl/managed"
+	cfg.DBusServiceDir = "/etc/dbus-1/system-services"
 	cfg.UnitExtraDir = filepath.Join(home, ".config/servicectl/unitextra")
 	return cfg
 }

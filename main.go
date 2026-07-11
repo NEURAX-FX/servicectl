@@ -1,8 +1,11 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +15,8 @@ import (
 	"syscall"
 	"time"
 
+	"servicectl/internal/dbusactivation"
+	"servicectl/internal/dbusmanager"
 	"servicectl/internal/util"
 	"servicectl/internal/visionapi"
 )
@@ -26,7 +31,7 @@ Usage:
   servicectl [--user] dinit <args...>
 
 Core commands:
-  start         Install/generated dependencies as needed, then start unit(s)
+  start         Generate/install dependencies as needed, then start unit(s)
   stop          Stop unit(s)
   restart       Restart unit(s)
   reload        Reload unit(s)
@@ -48,6 +53,9 @@ S6 orchestration commands:
 Low-level / internal:
   dinit         Raw passthrough to dinit/dinitctl
   serve-api     Start the local servicectl query/event API socket
+  activate-dbus Internal D-Bus activation entrypoint
+  dbus-activation Configure the sys-dbusd activation frontend
+  version       Show the servicectl version
   help          Show this help
 
 Modes:
@@ -198,6 +206,25 @@ func notifyManagedActiveLine(state string, runtimeChildState string) string {
 	}
 }
 
+func dbusManagedActiveLine(state string, runtimeChildState string) string {
+	base := formatActiveLine(state)
+	if base != "active (running)" {
+		return base
+	}
+	switch runtimeChildState {
+	case "starting":
+		return "activating (dbus manager running, backend starting)"
+	case "running":
+		return "active (dbus manager running, backend running)"
+	case "stopping":
+		return "deactivating (dbus manager running, backend stopping)"
+	case "idle":
+		return "active (dbus manager running, backend idle)"
+	default:
+		return "active (dbus manager running)"
+	}
+}
+
 func printStatus(unitName string) {
 	if snapshot, ok := queryUnitSnapshotViaSysvision(unitName); ok {
 		printStatusFromSnapshot(unitName, snapshot)
@@ -231,6 +258,8 @@ func printStatus(unitName string) {
 	runtimeChildState := ""
 	runtimeStatus := ""
 	runtimeFailure := ""
+	runtimeBusName := ""
+	runtimeBusOwner := ""
 	runtimeSocketCount := 0
 	if err == nil {
 		if unit.Description != "" {
@@ -255,6 +284,8 @@ func printStatus(unitName string) {
 		runtimeChildState = runtimeState["child_state"]
 		runtimeStatus = runtimeState["status"]
 		runtimeFailure = runtimeState["failure"]
+		runtimeBusName = runtimeState["bus_name"]
+		runtimeBusOwner = runtimeState["bus_owner"]
 		runtimeSocketCount, _ = strconv.Atoi(runtimeState["socket_count"])
 		if runtimeMainPID != "" && runtimeMainPID != "0" {
 			mainPID = runtimeMainPID
@@ -266,7 +297,9 @@ func printStatus(unitName string) {
 	exitStatus := parseExitStatus(state)
 	activeLine := formatActiveLine(state)
 	if runtimeState != nil {
-		if runtimeSocketCount > 0 {
+		if mode == managedDbusd {
+			activeLine = dbusManagedActiveLine(state, runtimeChildState)
+		} else if runtimeSocketCount > 0 {
 			activeLine = socketManagedActiveLine(state, runtimePhase, runtimeChildState)
 		} else {
 			activeLine = notifyManagedActiveLine(state, runtimeChildState)
@@ -304,6 +337,12 @@ func printStatus(unitName string) {
 	if runtimeFailure != "" {
 		printStatusKV("Failure", runtimeFailure)
 	}
+	if runtimeBusName != "" {
+		printStatusKV("Bus Name", runtimeBusName)
+	}
+	if runtimeBusOwner != "" {
+		printStatusKV("Bus Owner", runtimeBusOwner)
+	}
 }
 
 func printStatusFromSnapshot(unitName string, snapshot visionapi.UnitSnapshot) {
@@ -338,7 +377,9 @@ func printStatusFromSnapshot(unitName string, snapshot visionapi.UnitSnapshot) {
 	management := managementState(unitName)
 	busState := currentBusState()
 	activeLine := formatActiveLine(state)
-	if snapshot.ManagedBy == "sys-notifyd" {
+	if snapshot.DinitName != "" && strings.HasSuffix(snapshot.DinitName, "-dbusd") {
+		activeLine = dbusManagedActiveLine(state, runtimeChildState)
+	} else if snapshot.ManagedBy == "sys-notifyd" {
 		if snapshot.NotifySocket != "" {
 			activeLine = socketManagedActiveLine(state, runtimePhase, runtimeChildState)
 		} else {
@@ -385,6 +426,12 @@ func printStatusFromSnapshot(unitName string, snapshot visionapi.UnitSnapshot) {
 	}
 	if runtimeFailure != "" {
 		printStatusKV("Failure", runtimeFailure)
+	}
+	if snapshot.BusName != "" {
+		printStatusKV("Bus Name", snapshot.BusName)
+	}
+	if snapshot.BusOwner != "" {
+		printStatusKV("Bus Owner", snapshot.BusOwner)
 	}
 }
 
@@ -677,6 +724,10 @@ func reloadUnit(unitName string) int {
 }
 
 func isUnitStarted(unitName string) bool {
+	return isUnitStartedFunc(unitName)
+}
+
+var isUnitStartedFunc = func(unitName string) bool {
 	cmd := dinitctlCommand("is-started", backendServiceNameForUnit(unitName))
 	cmd.Stdout = nil
 	cmd.Stderr = nil
@@ -801,7 +852,7 @@ func showUnit(unitName string) int {
 	if mainPID == "" && status != nil {
 		mainPID = status["Process ID"]
 	}
-	printSection("Runtime", [][2]string{{"State", statusValue(status, "State")}, {"Activation", statusValue(status, "Activation")}, {"Process ID", statusValue(status, "Process ID")}, {"Manager PID", managerRuntimePID}, {"Main PID", mainPID}, {"Phase", mapValue(runtimeState, "phase")}, {"Child", mapValue(runtimeState, "child_state")}, {"Status", mapValue(runtimeState, "status")}, {"Failure", mapValue(runtimeState, "failure")}, {"Notify Sock", notifySocketPath(unitName, unit, socketUnit)}, {"State File", managedStateFilePath(unitName, unit, socketUnit)}})
+	printSection("Runtime", [][2]string{{"State", statusValue(status, "State")}, {"Activation", statusValue(status, "Activation")}, {"Process ID", statusValue(status, "Process ID")}, {"Manager PID", managerRuntimePID}, {"Main PID", mainPID}, {"Phase", mapValue(runtimeState, "phase")}, {"Child", mapValue(runtimeState, "child_state")}, {"Status", mapValue(runtimeState, "status")}, {"Failure", mapValue(runtimeState, "failure")}, {"Notify Sock", notifySocketPath(unitName, unit, socketUnit)}, {"Bus Name", mapValue(runtimeState, "bus_name")}, {"Bus Owner", mapValue(runtimeState, "bus_owner")}, {"State File", managedStateFilePath(unitName, unit, socketUnit)}})
 	printSection("Exec", [][2]string{{"Service Type", unit.Type}, {"ExecStart", backendCmd}, {"ExecReload", reloadCmd}, {"ExecStop", stopCmd}, {"WorkingDir", unit.WorkingDirectory}, {"User", unit.User}, {"Group", unit.Group}})
 	printSection("Sockets", [][2]string{{"Socket Unit", socketSource(socketUnit)}, {"Listen", socketListenValue(socketUnit)}, {"FD Names", formatList(socketFDNames(socketUnit))}})
 	printEnvironmentSection(unit)
@@ -842,7 +893,7 @@ func showUnitFromSnapshot(unitName string, snapshot visionapi.UnitSnapshot) int 
 	fmt.Printf("%s %s\n\n", colorize("servicectl show", styleBold, styleCyan), colorize(unitName+".service", styleBold))
 	managementMode := managedServiceModeForUnit(unit, socketUnit)
 	printSection("Unit", [][2]string{{"Name", unitName + ".service"}, {"Mode", config.Mode}, {"Description", unit.Description}, {"Source", unit.SourcePath}, {"Managed By", snapshot.ManagedBy}, {"Activation Model", string(managementMode)}, {"Dinit", snapshot.DinitName}, {"Logger", snapshot.LoggerName}, {"Log Tag", util.JournalIdentifier(unitName)}})
-	printSection("Runtime", [][2]string{{"State", emptyDash(snapshot.State)}, {"Activation", emptyDash(snapshot.Activation)}, {"Process ID", emptyDash(snapshot.ProcessID)}, {"Manager PID", emptyDash(snapshot.ManagerPID)}, {"Main PID", emptyDash(snapshot.MainPID)}, {"Phase", emptyDash(snapshot.Phase)}, {"Child", emptyDash(snapshot.ChildState)}, {"Status", emptyDash(snapshot.Status)}, {"Failure", emptyDash(snapshot.Failure)}, {"Notify Sock", emptyDash(snapshot.NotifySocket)}, {"State File", emptyDash(snapshot.StateFile)}})
+	printSection("Runtime", [][2]string{{"State", emptyDash(snapshot.State)}, {"Activation", emptyDash(snapshot.Activation)}, {"Process ID", emptyDash(snapshot.ProcessID)}, {"Manager PID", emptyDash(snapshot.ManagerPID)}, {"Main PID", emptyDash(snapshot.MainPID)}, {"Phase", emptyDash(snapshot.Phase)}, {"Child", emptyDash(snapshot.ChildState)}, {"Status", emptyDash(snapshot.Status)}, {"Failure", emptyDash(snapshot.Failure)}, {"Notify Sock", emptyDash(snapshot.NotifySocket)}, {"Bus Name", emptyDash(snapshot.BusName)}, {"Bus Owner", emptyDash(snapshot.BusOwner)}, {"State File", emptyDash(snapshot.StateFile)}})
 	printSection("Orchestration", [][2]string{{"Enabled", enabledState}, {"Management", management}, {"Orchestrator", orchName}, {"Orchestrator Scope", config.Mode}, {"Orchestrator State", emptyDash(mapValue(orchState, "state"))}, {"Orchestrator PID", emptyDash(orchPID)}, {"Orchestrator State File", orchestratorStateFilePath(unitName)}, {"Last Orchestration Event", emptyDash(mapValue(orchState, "state"))}, {"Last Orchestration Reason", emptyDash(mapValue(orchState, "reason"))}})
 	printSection("S6", [][2]string{{"S6 Service", orchName}, {"S6 Bundle", s6BundleName()}, {"S6 Source Root", s6SourceRoot()}, {"S6 Source Dir", s6OrchestrdSourceDir(unitName)}, {"In Default Bundle", boolWord(s6ContentsContain(s6DefaultContentsPath(), s6BundleName()) && s6ContentsContain(s6DefaultContentsPath(), s6SysvisiondServiceName()) && s6ContentsContain(s6DefaultContentsPath(), s6ServicectlAPIServiceName()))}, {"In Enable Bundle", boolWord(s6ContentsContain(s6BundleContentsPath(), orchName))}})
 	printSection("Control Plane", [][2]string{{"Servicectl API Socket", visionapi.ServicectlSocketPath(userMode(), runtimeDir())}, {"Servicectl Events Socket", visionapi.ServicectlEventsSocketPath(userMode(), runtimeDir())}, {"Sysvisiond Socket", visionapi.SysvisionSocketPath(userMode(), runtimeDir())}, {"Sysvisiond Ingress", visionapi.SysvisionIngressSocketPath(userMode(), runtimeDir())}, {"Bus Connected", busConnected}, {"Bus Error", emptyDash(busMeta.errorText)}})
@@ -924,7 +975,123 @@ func recursiveStart(unitName string, visited map[string]bool, opts startOptions)
 	return true
 }
 
+func startUnit(unitName string, opts startOptions) bool {
+	cleanName := strings.TrimSuffix(unitName, ".service")
+	if _, err := parseSystemdUnit(cleanName); err != nil {
+		fmt.Println(err)
+		return false
+	}
+	recursiveInstall(cleanName, make(map[string]bool), installOptionsForUnit(cleanName, false))
+	return recursiveStart(cleanName, make(map[string]bool), opts)
+}
+
+func activateDBusUnit(unitName string) int {
+	cleanName := strings.TrimSuffix(strings.TrimSpace(unitName), ".service")
+	unit, err := parseSystemdUnit(cleanName)
+	if err != nil {
+		fmt.Println(err)
+		return 1
+	}
+	if strings.TrimSpace(unit.BusName) == "" {
+		fmt.Printf("Unit %s.service does not declare BusName=.\n", cleanName)
+		return 1
+	}
+	recursiveInstall(cleanName, make(map[string]bool), installOptionsForUnit(cleanName, false))
+	mode := managedServiceModeForUnit(unit, nil)
+	if !runDinitctl("start", managedServiceName(cleanName, mode)) {
+		return 1
+	}
+	if err := controlDBusActivationFunc(managedControlPath(cleanName, mode), 5*time.Second); err != nil {
+		if fallbackErr := triggerDBusActivationFunc(managedDBusTriggerPath(cleanName, mode), 5*time.Second); fallbackErr != nil {
+			fmt.Println(oneLineError("D-Bus activation failed", errors.Join(err, fallbackErr)))
+			return 1
+		}
+	}
+	if err := waitForDBusOwnerFunc(unit.BusName, 30*time.Second); err != nil {
+		fmt.Println(oneLineError("D-Bus service did not acquire name", err))
+		return 1
+	}
+	return 0
+}
+
+var triggerDBusActivationFunc = triggerDBusActivation
+
+var controlDBusActivationFunc = controlDBusActivation
+
+func controlDBusActivation(path string, timeout time.Duration) error {
+	ctx := context.Background()
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	var lastErr error
+	for {
+		if err := dbusactivation.ActivateControl(ctx, path); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+		select {
+		case <-ctx.Done():
+			return lastErr
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}
+
+func triggerDBusActivation(path string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for {
+		if err := sendDBusActivationTrigger(path); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+		if timeout <= 0 || time.Now().After(deadline) {
+			return lastErr
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func sendDBusActivationTrigger(path string) error {
+	addr := &net.UnixAddr{Name: path, Net: "unixgram"}
+	conn, err := net.DialUnix("unixgram", nil, addr)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	_, err = conn.Write([]byte("start"))
+	return err
+}
+
+var waitForDBusOwnerFunc = waitForDBusOwner
+
+func waitForDBusOwner(busName string, timeout time.Duration) error {
+	ctx := context.Background()
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	bus, err := dbusmanager.NewSystemBus()
+	if userMode() {
+		bus, err = dbusmanager.NewSessionBus()
+	}
+	if err != nil {
+		return err
+	}
+	_, err = dbusmanager.New(dbusmanager.Options{BusName: busName, Bus: bus}).WaitForOwner(ctx, 100*time.Millisecond)
+	return err
+}
+
 func runDinitctl(args ...string) bool {
+	return runDinitctlFunc(args...)
+}
+
+var runDinitctlFunc = func(args ...string) bool {
 	out, _, err := dinitctlOutput(args...)
 	if err != nil {
 		if out != "" {
@@ -961,6 +1128,10 @@ func dinitctlCommand(args ...string) *exec.Cmd {
 }
 
 func isDinitServiceKnown(name string) bool {
+	return isDinitServiceKnownFunc(name)
+}
+
+var isDinitServiceKnownFunc = func(name string) bool {
 	cmd := dinitctlCommand("status", name)
 	return cmd.Run() == nil
 }
@@ -1335,12 +1506,16 @@ parsedFlags:
 			return
 		}
 	}
-	if groupFlag == "" && len(args) == 1 && args[0] != "list" && args[0] != "serve-api" {
+	if groupFlag == "" && len(args) == 1 && args[0] != "list" && args[0] != "serve-api" && args[0] != "version" {
 		printHelp()
 		return
 	}
 
 	action, targets := args[0], args[1:]
+	if action == "version" {
+		fmt.Printf("servicectl %s\n", versionString())
+		return
+	}
 	startOpts := startOptions{force: forceFlag}
 	if parsedAction, parsedTargets, parsedGroup, handled, err := parseGroupInvocation(originalArgs, action, targets, groupFlag); handled {
 		if err != nil {
@@ -1355,6 +1530,16 @@ parsedFlags:
 	}
 	if action == "serve-api" {
 		os.Exit(servicectlAPIServer())
+	}
+	if action == "activate-dbus" {
+		if len(targets) != 1 {
+			fmt.Println("Usage: servicectl [--user] activate-dbus <unit>")
+			os.Exit(1)
+		}
+		os.Exit(activateDBusUnit(targets[0]))
+	}
+	if action == "dbus-activation" {
+		os.Exit(dbusActivationCommand(targets))
 	}
 	if action == "group-start-order" {
 		if len(targets) != 1 {
@@ -1486,14 +1671,7 @@ parsedFlags:
 
 		switch action {
 		case "start":
-			if _, err := parseSystemdUnit(cleanName); err != nil {
-				fmt.Println(err)
-				publishServicectlCommandEvent(action, cleanName, "error")
-				exitCode = 1
-				continue
-			}
-			recursiveInstall(cleanName, make(map[string]bool), installOptionsForUnit(cleanName, false))
-			if !recursiveStart(cleanName, make(map[string]bool), startOpts) {
+			if !startUnit(cleanName, startOpts) {
 				publishServicectlCommandEvent(action, cleanName, "error")
 				exitCode = 1
 				continue

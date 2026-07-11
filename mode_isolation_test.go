@@ -41,6 +41,18 @@ func TestS6PathsAreUnifiedAcrossModes(t *testing.T) {
 	}
 }
 
+func TestDBusActivationDirectoriesAreModeSpecific(t *testing.T) {
+	systemConfig := buildConfig(false)
+	if systemConfig.DBusServiceDir != "/etc/dbus-1/system-services" {
+		t.Fatalf("system DBusServiceDir = %q, want /etc/dbus-1/system-services", systemConfig.DBusServiceDir)
+	}
+
+	userConfig := buildConfig(true)
+	if !strings.HasSuffix(userConfig.DBusServiceDir, "/.local/share/dbus-1/services") {
+		t.Fatalf("user DBusServiceDir = %q, want ~/.local/share/dbus-1/services", userConfig.DBusServiceDir)
+	}
+}
+
 func TestEnableGroupWithS6WritesUserRunScriptInUnifiedPlane(t *testing.T) {
 	tmp := t.TempDir()
 	prevConfig := config

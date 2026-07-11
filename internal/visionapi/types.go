@@ -172,6 +172,8 @@ type UnitSnapshot struct {
 	Status       string `json:"status"`
 	Failure      string `json:"failure"`
 	NotifySocket string `json:"notify_socket"`
+	BusName      string `json:"bus_name"`
+	BusOwner     string `json:"bus_owner"`
 	StateFile    string `json:"state_file"`
 	UpdatedAt    string `json:"updated_at"`
 }

@@ -15,6 +15,7 @@ const (
 	managedDirect  managedServiceMode = "direct"
 	managedNotifyd managedServiceMode = "notifyd"
 	managedSocketd managedServiceMode = "socketd"
+	managedDbusd   managedServiceMode = "dbusd"
 )
 
 func dinitArg(s string) string {
@@ -33,6 +34,9 @@ func managedServiceModeForUnit(unit *Unit, socketUnit *SocketUnit) managedServic
 		}
 		return managedSocketd
 	}
+	if unit != nil && strings.TrimSpace(unit.BusName) != "" {
+		return managedDbusd
+	}
 	if unit != nil && strings.EqualFold(unit.Type, "notify") {
 		return managedNotifyd
 	}
@@ -46,6 +50,8 @@ func managedServiceName(name string, mode managedServiceMode) string {
 		return cleanName + "-notifyd"
 	case managedSocketd:
 		return cleanName + "-socketd"
+	case managedDbusd:
+		return cleanName + "-dbusd"
 	default:
 		return cleanName
 	}
@@ -331,7 +337,11 @@ func (u *Unit) GenerateNotifydDinit(mode managedServiceMode, socketUnit *SocketU
 	backendEnv := mergedServiceEnv(u)
 	backendCmd := compileExecStart(u, backendEnv)
 	backendCmd = buildEnvPrefix(backendEnv) + backendCmd
-	args := []string{notifydBinaryPath(), "-service", dinitArg(u.Name), "-service-type", dinitArg(strings.ToLower(u.Type)), "-command", dinitArg(backendCmd), "-state-file", dinitArg(notifydStatePath(u.Name, mode))}
+	managerPath := notifydBinaryPath()
+	args := []string{managerPath, "-service", dinitArg(u.Name), "-service-type", dinitArg(strings.ToLower(u.Type)), "-command", dinitArg(backendCmd), "-state-file", dinitArg(notifydStatePath(u.Name, mode))}
+	if mode == managedDbusd {
+		args = []string{notifydBinaryPath(), "-service", dinitArg(u.Name), "-service-type", dinitArg(strings.ToLower(u.Type)), "-bus-name", dinitArg(u.BusName), "-control-path", dinitArg(managedControlPath(u.Name, mode)), "-command", dinitArg(backendCmd), "-state-file", dinitArg(notifydStatePath(u.Name, mode))}
+	}
 	if userMode() {
 		args = append(args, "-user")
 	}
@@ -354,13 +364,46 @@ func (u *Unit) GenerateNotifydDinit(mode managedServiceMode, socketUnit *SocketU
 	if mode == managedSocketd {
 		args = append(args, socketListenArgs(socketUnit)...)
 	}
-	if mode != managedSocketd {
+	if mode != managedSocketd && mode != managedDbusd {
 		args = append(args, "-start-now")
 	}
 	sb.WriteString(fmt.Sprintf("command = %s\n", strings.Join(args, " ")))
 	sb.WriteString("smooth-recovery = true\n")
 	sb.WriteString("log-type = pipe\n")
 	return sb.String()
+}
+
+func generateDBusActivationFile(unitName string, busName string) string {
+	args := []string{servicectlBinaryPath()}
+	if userMode() {
+		args = append(args, "--user")
+	}
+	args = append(args, "activate-dbus", unitName)
+	var sb strings.Builder
+	sb.WriteString("[D-BUS Service]\n")
+	sb.WriteString(fmt.Sprintf("Name=%s\n", strings.TrimSpace(busName)))
+	sb.WriteString(fmt.Sprintf("Exec=%s\n", strings.Join(args, " ")))
+	if !userMode() {
+		sb.WriteString("User=root\n")
+	}
+	return sb.String()
+}
+
+func installDBusActivationFile(unit *Unit) bool {
+	if unit == nil || strings.TrimSpace(unit.BusName) == "" || strings.TrimSpace(config.DBusServiceDir) == "" {
+		return true
+	}
+	if err := os.MkdirAll(config.DBusServiceDir, 0755); err != nil {
+		fmt.Printf("Error creating D-Bus service dir for %s: %v\n", unit.Name, err)
+		return false
+	}
+	path := filepath.Join(config.DBusServiceDir, strings.TrimSpace(unit.BusName)+".service")
+	content := []byte(generateDBusActivationFile(unit.Name, unit.BusName))
+	if err := os.WriteFile(path, content, 0644); err != nil {
+		fmt.Printf("Error writing D-Bus activation file for %s: %v\n", unit.Name, err)
+		return false
+	}
+	return true
 }
 
 type installOptions struct {
@@ -401,6 +444,32 @@ func installGeneratedService(serviceName string, content []byte, opts installOpt
 	return true
 }
 
+func obsoleteManagedServiceNames(unitName string, currentMode managedServiceMode) []string {
+	modes := []managedServiceMode{managedNotifyd, managedSocketd, managedDbusd}
+	result := make([]string, 0, len(modes))
+	for _, mode := range modes {
+		if mode == currentMode {
+			continue
+		}
+		result = append(result, managedServiceName(unitName, mode))
+	}
+	return result
+}
+
+func cleanupObsoleteManagedServices(unitName string, currentMode managedServiceMode) {
+	if currentMode == managedDirect {
+		return
+	}
+	for _, serviceName := range obsoleteManagedServiceNames(unitName, currentMode) {
+		if isDinitServiceKnown(serviceName) {
+			runDinitctl("stop", serviceName)
+			runDinitctl("unload", "--ignore-unstarted", serviceName)
+		}
+		_ = os.Remove(filepath.Join(config.DinitServiceDir, serviceName))
+		_ = os.Remove(filepath.Join(config.DinitServiceDir, loggerServiceName(serviceName)))
+	}
+}
+
 func recursiveInstall(unitName string, visited map[string]bool, opts installOptions) {
 	cleanName := strings.TrimSuffix(unitName, ".service")
 	if visited[cleanName] {
@@ -419,6 +488,7 @@ func recursiveInstall(unitName string, visited map[string]bool, opts installOpti
 	mode := managedServiceModeForUnit(unit, socketUnit)
 	serviceName := managedServiceName(cleanName, mode)
 	knownToDinit := isDinitServiceKnown(serviceName)
+	cleanupObsoleteManagedServices(cleanName, mode)
 	for _, d := range hardStartDependencies(unit) {
 		cleanDep := strings.TrimSuffix(resolveUnitAlias(d), ".service")
 		if externalManagedStateFunc(cleanDep) {
@@ -456,6 +526,9 @@ func recursiveInstall(unitName string, visited map[string]bool, opts installOpti
 		content = []byte(unit.GenerateDinit())
 	}
 	if !installGeneratedService(serviceName, content, opts) {
+		return
+	}
+	if strings.TrimSpace(unit.BusName) != "" && !installDBusActivationFile(unit) {
 		return
 	}
 	loggerName := loggerServiceName(serviceName)

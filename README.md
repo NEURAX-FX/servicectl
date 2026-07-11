@@ -2,6 +2,10 @@
 
 `servicectl` is a `systemctl`-like CLI for a dinit-based service stack, extended with an s6 orchestration layer and a local event/query bus.
 
+## License
+
+`servicectl` is licensed under the MIT License. See [LICENSE](LICENSE).
+
 ## Components
 
 - `servicectl`: the main CLI and local control surface
@@ -94,6 +98,12 @@ Group=audio
 - `cmd/`: standalone helper daemons and test binaries
 - `internal/visionapi/`: shared runtime path and event/query types
 - `scripts/`: install and regression test scripts
+
+## Packaging
+
+Fedora 44+ SRPM build and installation instructions are in
+[`packaging/README.md`](packaging/README.md). The package and filesystem design
+is documented in [`packaging/SRPM-DESIGN.md`](packaging/SRPM-DESIGN.md).
 
 ## Build
 

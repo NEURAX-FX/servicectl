@@ -15,6 +15,7 @@ type Unit struct {
 	SourcePath       string
 	Description      string
 	Type             string
+	BusName          string
 	RemainAfterExit  bool
 	ExecStart        []string
 	ExecStop         string
@@ -178,6 +179,8 @@ func parseSystemdUnit(name string) (*Unit, error) {
 				switch k {
 				case "Type":
 					unit.Type = v
+				case "BusName":
+					unit.BusName = v
 				case "RemainAfterExit":
 					unit.RemainAfterExit = strings.EqualFold(v, "yes") || strings.EqualFold(v, "true") || v == "1"
 				case "ExecStart":

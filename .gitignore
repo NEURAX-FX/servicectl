@@ -8,6 +8,9 @@
 /notify-sleeper
 /test-envd
 /sys-propertyd
+/cmd/sys-dbusd-daemon-helper/sys-dbusd-daemon-helper
+/packaging/sources/
+/dist/
 /docs/
 .worktrees/
 .lcm/

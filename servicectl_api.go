@@ -153,6 +153,8 @@ func buildUnitSnapshot(cfg Config, unitName string) (visionapi.UnitSnapshot, err
 		Status:       mapValue(runtimeState, "status"),
 		Failure:      mapValue(runtimeState, "failure"),
 		NotifySocket: notifySocketPath(unitName, unit, socketUnit),
+		BusName:      util.FirstNonEmpty(mapValue(runtimeState, "bus_name"), unit.BusName),
+		BusOwner:     mapValue(runtimeState, "bus_owner"),
 		StateFile:    managedStateFilePath(unitName, unit, socketUnit),
 		UpdatedAt:    time.Now().UTC().Format(time.RFC3339Nano),
 	}, nil

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -19,29 +20,33 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/sys/unix"
 	"servicectl/internal/visionapi"
 )
 
 type config struct {
-	serviceName  string
-	serviceType  string
-	command      string
-	stopCommand  string
-	userMode     bool
-	verbose      bool
-	readyFD      int
-	startNow     bool
-	stateFile    string
-	mode         string
-	socketUser   string
-	socketGroup  string
-	readyTimeout time.Duration
-	stopTimeout  time.Duration
-	killSignal   string
-	notify       bool
-	notifyPath   string
-	listens      listenSpecs
-	fdNames      stringList
+	serviceName     string
+	serviceType     string
+	command         string
+	stopCommand     string
+	userMode        bool
+	verbose         bool
+	readyFD         int
+	startNow        bool
+	stateFile       string
+	mode            string
+	socketUser      string
+	socketGroup     string
+	readyTimeout    time.Duration
+	stopTimeout     time.Duration
+	killSignal      string
+	notify          bool
+	notifyPath      string
+	busName         string
+	dbusTriggerPath string
+	controlPath     string
+	listens         listenSpecs
+	fdNames         stringList
 }
 
 type listenSpecs []string
@@ -88,6 +93,8 @@ type server struct {
 	logger      *log.Logger
 	sockets     []activationSocket
 	notifyConn  *net.UnixConn
+	dbusTrigger *net.UnixConn
+	control     *net.UnixListener
 	childReady  chan struct{}
 	childReadyN uint64
 	cmd         *exec.Cmd
@@ -127,6 +134,12 @@ func main() {
 	defer srv.cleanup()
 
 	if err := srv.armActivation(); err != nil {
+		logger.Fatal(err)
+	}
+	if err := srv.armDBusActivation(); err != nil {
+		logger.Fatal(err)
+	}
+	if err := srv.armControlActivation(); err != nil {
 		logger.Fatal(err)
 	}
 
@@ -191,6 +204,9 @@ func parseFlags() config {
 	flag.StringVar(&cfg.killSignal, "kill-signal", "TERM", "signal used to stop the main process after ExecStop or when no stop command is set")
 	flag.BoolVar(&cfg.notify, "notify", false, "create NOTIFY_SOCKET and receive sd_notify messages")
 	flag.StringVar(&cfg.notifyPath, "notify-path", "", "unixgram socket path for sd_notify messages")
+	flag.StringVar(&cfg.busName, "bus-name", "", "D-Bus well-known name managed by this service")
+	flag.StringVar(&cfg.dbusTriggerPath, "dbus-trigger-path", "", "unixgram socket path used by D-Bus activation to start the backend")
+	flag.StringVar(&cfg.controlPath, "control-path", "", "root-only unix socket used by service managers to activate the backend")
 	flag.Var(&cfg.listens, "listen", "activation socket in the form network:address, may be repeated")
 	flag.Var(&cfg.fdNames, "fdname", "activation fd name, may be repeated")
 	flag.Parse()
@@ -208,6 +224,9 @@ func parseFlags() config {
 	}
 	if cfg.notify && cfg.notifyPath == "" {
 		cfg.notifyPath = filepath.Join(os.TempDir(), cfg.serviceName+".notify.sock")
+	}
+	if cfg.busName != "" && cfg.controlPath == "" && cfg.dbusTriggerPath == "" {
+		cfg.controlPath = filepath.Join(os.TempDir(), cfg.serviceName+".control.sock")
 	}
 	return cfg
 }
@@ -270,6 +289,168 @@ func (s *server) armActivation() error {
 	}
 	go s.activationLoop()
 	return nil
+}
+
+func (s *server) armDBusActivation() error {
+	if strings.TrimSpace(s.cfg.busName) == "" || strings.TrimSpace(s.cfg.dbusTriggerPath) == "" || s.cfg.command == "" || s.cfg.startNow {
+		return nil
+	}
+	if err := prepareUnixSocketPath(s.cfg.dbusTriggerPath); err != nil {
+		return err
+	}
+	addr := &net.UnixAddr{Name: s.cfg.dbusTriggerPath, Net: "unixgram"}
+	conn, err := net.ListenUnixgram("unixgram", addr)
+	if err != nil {
+		return fmt.Errorf("listen dbus trigger socket: %w", err)
+	}
+	if err := os.Chmod(s.cfg.dbusTriggerPath, 0o660); err != nil {
+		conn.Close()
+		return fmt.Errorf("chmod dbus trigger socket: %w", err)
+	}
+	if err := applySocketOwnership(s.cfg.dbusTriggerPath, s.cfg.socketUser, s.cfg.socketGroup); err != nil {
+		conn.Close()
+		return err
+	}
+	s.dbusTrigger = conn
+	go s.dbusActivationLoop()
+	return nil
+}
+
+func (s *server) armControlActivation() error {
+	if strings.TrimSpace(s.cfg.controlPath) == "" || s.cfg.command == "" || s.cfg.startNow {
+		return nil
+	}
+	if err := prepareUnixSocketPath(s.cfg.controlPath); err != nil {
+		return err
+	}
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: s.cfg.controlPath, Net: "unix"})
+	if err != nil {
+		return fmt.Errorf("listen control socket: %w", err)
+	}
+	if err := os.Chmod(s.cfg.controlPath, 0o600); err != nil {
+		listener.Close()
+		return fmt.Errorf("chmod control socket: %w", err)
+	}
+	s.control = listener
+	go s.controlActivationLoop()
+	return nil
+}
+
+func (s *server) controlActivationLoop() {
+	for {
+		conn, err := s.control.AcceptUnix()
+		if err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				return
+			}
+			select {
+			case <-s.shutdownCh:
+				return
+			case s.startErr <- fmt.Errorf("control activation accept failed: %w", err):
+			default:
+			}
+			return
+		}
+		go s.handleControlActivation(conn)
+	}
+}
+
+func (s *server) handleControlActivation(conn *net.UnixConn) {
+	defer conn.Close()
+	uid, err := unixPeerUID(conn)
+	if err != nil {
+		return
+	}
+	if err := authorizeControlPeer(uid); err != nil {
+		_, _ = conn.Write([]byte("denied\n"))
+		return
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	buffer := make([]byte, 32)
+	n, err := conn.Read(buffer)
+	if err != nil || string(buffer[:n]) != "activate\n" {
+		_, _ = conn.Write([]byte("invalid\n"))
+		return
+	}
+	s.tryQueueStart("dbus activation")
+	_, _ = conn.Write([]byte("ok\n"))
+}
+
+func unixPeerUID(conn *net.UnixConn) (uint32, error) {
+	raw, err := conn.SyscallConn()
+	if err != nil {
+		return 0, err
+	}
+	var credential *unix.Ucred
+	var socketErr error
+	if err := raw.Control(func(fd uintptr) {
+		credential, socketErr = unix.GetsockoptUcred(int(fd), unix.SOL_SOCKET, unix.SO_PEERCRED)
+	}); err != nil {
+		return 0, err
+	}
+	if socketErr != nil {
+		return 0, socketErr
+	}
+	return credential.Uid, nil
+}
+
+func authorizeControlPeer(uid uint32) error {
+	if uid != 0 {
+		return fmt.Errorf("control peer uid %d is not root", uid)
+	}
+	return nil
+}
+
+func sendControlActivation(ctx context.Context, path string) error {
+	dialer := net.Dialer{}
+	conn, err := dialer.DialContext(ctx, "unix", path)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte("activate\n")); err != nil {
+		return err
+	}
+	buffer := make([]byte, 16)
+	n, err := conn.Read(buffer)
+	if err != nil {
+		return err
+	}
+	if string(buffer[:n]) != "ok\n" {
+		return fmt.Errorf("activation control rejected request: %s", strings.TrimSpace(string(buffer[:n])))
+	}
+	return nil
+}
+
+func (s *server) dbusActivationLoop() {
+	buf := make([]byte, 64)
+	for {
+		_, _, err := s.dbusTrigger.ReadFromUnix(buf)
+		if err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				return
+			}
+			select {
+			case <-s.shutdownCh:
+				return
+			case s.startErr <- fmt.Errorf("dbus activation trigger failed: %w", err):
+			default:
+			}
+			return
+		}
+		s.tryQueueStart("dbus activation")
+	}
+}
+
+func sendDBusActivationTrigger(path string) error {
+	addr := &net.UnixAddr{Name: path, Net: "unixgram"}
+	conn, err := net.DialUnix("unixgram", nil, addr)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	_, err = conn.Write([]byte("start"))
+	return err
 }
 
 func (s *server) activationLoop() {
@@ -815,7 +996,7 @@ func (s *server) monitorChildStartup(seq uint64, ready <-chan struct{}, cmdDone 
 		return
 	}
 	if err := s.waitForReady(seq, ready, cmdDone); err != nil {
-		if s.isLazySocketService() {
+		if s.isLazyActivationService() {
 			select {
 			case s.startErr <- err:
 			default:
@@ -832,6 +1013,14 @@ func (s *server) monitorChildStartup(seq uint64, ready <-chan struct{}, cmdDone 
 
 func (s *server) isLazySocketService() bool {
 	return len(s.sockets) > 0 && !s.cfg.startNow
+}
+
+func (s *server) isLazyDBusService() bool {
+	return strings.TrimSpace(s.cfg.busName) != "" && !s.cfg.startNow
+}
+
+func (s *server) isLazyActivationService() bool {
+	return s.isLazySocketService() || s.isLazyDBusService()
 }
 
 func (s *server) tryQueueStart(reason string) {
@@ -857,7 +1046,7 @@ func (s *server) startChildIfNeeded(reason string) error {
 }
 
 func (s *server) handleChildExit(err error) error {
-	if s.isLazySocketService() {
+	if s.isLazyActivationService() {
 		if err != nil {
 			s.logger.Printf("backend exited: %v", err)
 			s.debug.event("notifyd.child-exit", map[string]any{"service": s.cfg.serviceName, "ok": false, "error": err.Error(), "lazy": true, "user_mode": s.cfg.userMode})
@@ -879,7 +1068,7 @@ func (s *server) handleChildExit(err error) error {
 }
 
 func (s *server) handleWatchdogTimeout(err error) error {
-	if s.isLazySocketService() {
+	if s.isLazyActivationService() {
 		return s.abortChild(err)
 	}
 	return s.abortChild(err)
@@ -893,7 +1082,7 @@ func (s *server) resetForIdleLocked() {
 	s.childState = "idle"
 	s.failureText = ""
 	s.trySendDuration(s.watchdogSet, 0)
-	if s.isLazySocketService() {
+	if s.isLazyActivationService() {
 		s.status = "listening"
 		s.phase = "ready"
 	} else {
@@ -1143,6 +1332,14 @@ func (s *server) cleanup() {
 		_ = s.notifyConn.Close()
 		_ = os.Remove(s.cfg.notifyPath)
 	}
+	if s.dbusTrigger != nil {
+		_ = s.dbusTrigger.Close()
+		_ = os.Remove(s.cfg.dbusTriggerPath)
+	}
+	if s.control != nil {
+		_ = s.control.Close()
+		_ = os.Remove(s.cfg.controlPath)
+	}
 	for _, sock := range s.sockets {
 		if sock.closer != nil {
 			_ = sock.closer()
@@ -1187,6 +1384,9 @@ func (s *server) writeStateLocked() {
 		"main_pid=" + strconv.Itoa(s.mainPID),
 		"socket_count=" + strconv.Itoa(len(s.sockets)),
 	}
+	if strings.TrimSpace(s.cfg.busName) != "" {
+		lines = append(lines, "bus_name="+sanitizeStateValue(s.cfg.busName))
+	}
 	tmpPath := s.cfg.stateFile + ".tmp"
 	content := strings.Join(lines, "\n") + "\n"
 	if err := os.WriteFile(tmpPath, []byte(content), 0644); err != nil {
@@ -1207,6 +1407,9 @@ func (s *server) publishVisionEventLocked(event string) {
 		"failure":      sanitizeStateValue(s.failureText),
 		"main_pid":     strconv.Itoa(s.mainPID),
 		"socket_count": strconv.Itoa(len(s.sockets)),
+	}
+	if strings.TrimSpace(s.cfg.busName) != "" {
+		payload["bus_name"] = sanitizeStateValue(s.cfg.busName)
 	}
 	envelope := visionapi.NewEvent(visionapi.ModeForUser(s.cfg.userMode), visionapi.SourceSysNotifyd, visionapi.KindUnitRuntime, s.cfg.serviceName, payload)
 	data, err := json.Marshal(envelope)
