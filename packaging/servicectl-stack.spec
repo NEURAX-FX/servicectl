@@ -300,7 +300,6 @@ install -Dpm0755 _build/bin/sysvisiond %{buildroot}%{_bindir}/sysvisiond
 install -Dpm0755 _build/bin/sys-orchestrd %{buildroot}%{_bindir}/sys-orchestrd
 install -Dpm4750 cmd/sys-dbusd-daemon-helper/sys-dbusd-daemon-helper %{buildroot}%{_libexecdir}/servicectl/sys-dbusd-daemon-helper
 install -Dpm0644 packaging/sys-dbusd %{buildroot}%{_sysconfdir}/dinit.d/sys-dbusd
-install -Dpm0644 packaging/sys-cgroupd %{buildroot}%{_sysconfdir}/dinit.d/sys-cgroupd
 install -Dpm0644 packaging/50-servicectl-activation.conf %{buildroot}%{_prefix}/lib/servicectl/dbus-activation/50-servicectl-activation.conf
 install -Dpm0644 usr/lib/servicectl/socket-holders.d/dbus.conf %{buildroot}%{_prefix}/lib/servicectl/socket-holders.d/dbus.conf
 install -Dpm0644 %{SOURCE6} %{buildroot}%{_tmpfilesdir}/servicectl.conf
@@ -345,6 +344,12 @@ test ! -e "%{buildroot}/run"
 
 %post -n servicectl
 %tmpfiles_create servicectl.conf
+if command -v dinitctl >/dev/null 2>&1; then
+  dinitctl stop sys-cgroupd >/dev/null 2>&1 || :
+  dinitctl unload sys-cgroupd >/dev/null 2>&1 || :
+fi
+rm -f %{_sysconfdir}/dinit.d/sys-cgroupd
+%{_bindir}/servicectl ensure-s6
 
 %files
 
@@ -363,7 +368,6 @@ test ! -e "%{buildroot}/run"
 %attr(4750,root,dbus) %{_libexecdir}/servicectl/sys-dbusd-daemon-helper
 %{_tmpfilesdir}/servicectl.conf
 %config(noreplace) %{_sysconfdir}/dinit.d/sys-dbusd
-%config(noreplace) %{_sysconfdir}/dinit.d/sys-cgroupd
 %dir %{_sysconfdir}/dbus-1/system-services
 %dir %{_sharedstatedir}/servicectl
 

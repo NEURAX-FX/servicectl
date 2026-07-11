@@ -429,7 +429,7 @@ func (d *daemon) queryGroup(name string) (visionapi.GroupState, bool) {
 func (d *daemon) queryUnit(unit string) (visionapi.UnitSnapshot, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	resp, err := d.sysvisionRequest(ctx, "/v1/query/unit/"+url.PathEscape(strings.TrimSuffix(unit, ".service")+".service"))
+	resp, err := d.sysvisionRequest(ctx, sysvisionUnitQueryPath(unit))
 	if err != nil {
 		return visionapi.UnitSnapshot{}, &operationError{Executor: "sysvision-api", Action: "query-unit", Target: unit, Err: err, Permanent: false}
 	}
@@ -442,6 +442,10 @@ func (d *daemon) queryUnit(unit string) (visionapi.UnitSnapshot, error) {
 		return visionapi.UnitSnapshot{}, &operationError{Executor: "sysvision-api", Action: "query-unit", Target: unit, Err: err, Permanent: false}
 	}
 	return snapshot, nil
+}
+
+func sysvisionUnitQueryPath(unit string) string {
+	return "/v1/query/unit/" + url.PathEscape(strings.TrimSuffix(strings.TrimSpace(unit), ".service"))
 }
 
 func (d *daemon) refreshGroups() {

@@ -6,8 +6,9 @@ sources. The source RPM emits separate binary RPMs plus a `servicectl-stack`
 meta package for one-command installation.
 
 The first supported target is Fedora 44 and newer. Installing the RPMs does
-not replace PID 1, start Dinit, start an s6 supervision tree, or enable any
-service automatically.
+not replace PID 1, start Dinit, or start an s6 supervision tree. On upgrades
+where a live servicectl S6 graph already exists, the scriptlet migrates
+`sys-cgroupd` into that graph and starts it there.
 
 ## Prerequisites
 
@@ -117,9 +118,10 @@ dinit --version
 s6-rc help
 ```
 
-No supervisor is started by RPM scriptlets. The operator must explicitly
-start a Dinit control process and initialize an s6 supervision tree before
-using live service operations.
+RPM scriptlets do not start a supervisor. The operator must explicitly start a
+Dinit control process and initialize an s6 supervision tree before using live
+service operations. If that S6 tree is already live during an install or
+upgrade, the `sys-cgroupd` migration is applied to it automatically.
 
 ## Inspect and Remove
 

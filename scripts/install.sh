@@ -141,14 +141,13 @@ if [[ "$SYSTEM_MODE" -eq 1 || "$INSTALL_SYSTEM_COPY" -eq 1 ]]; then
     'restart = true' \
     'smooth-recovery = true' \
     'log-type = buffer' > /etc/dinit.d/sys-dbusd
-  printf '%s\n' \
-    '# servicectl cgroup v2 process tracker' \
-    'type = process' \
-    'command = /usr/local/bin/sys-cgroupd' \
-    'restart = true' \
-    'smooth-recovery = true' \
-    'log-type = buffer' > /etc/dinit.d/sys-cgroupd
-  install -d -m 0700 /run/servicectl/sys-cgroupd
+	if command -v dinitctl >/dev/null 2>&1; then
+		dinitctl stop sys-cgroupd >/dev/null 2>&1 || true
+		dinitctl unload sys-cgroupd >/dev/null 2>&1 || true
+	fi
+	rm -f /etc/dinit.d/sys-cgroupd
+	install -d -m 0700 /run/servicectl/sys-cgroupd
+	"$SYSTEM_BINDIR/servicectl" ensure-s6
 fi
 
 printf '\nInstalled binaries:\n'

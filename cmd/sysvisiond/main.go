@@ -31,9 +31,9 @@ type subscriber struct {
 }
 
 type config struct {
-	mode         string
-	uid          uint32
-	pollInterval time.Duration
+	mode    string
+	uid     uint32
+	readyFD int
 }
 
 type planeState struct {
@@ -68,6 +68,11 @@ type daemon struct {
 	normalizer       *normalizer
 	refreshCh        chan struct{}
 	subscriberBuffer int
+	readyWriter      io.Writer
+	readySent        bool
+	refreshMu        sync.Mutex
+	refreshUpstream  func(context.Context) error
+	fetchUnits       func(context.Context) (visionapi.UnitsResponse, error)
 }
 
 func main() {
@@ -90,7 +95,7 @@ func parseConfig(args []string, euid int) (config, error) {
 	fs := flag.NewFlagSet("sysvisiond", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	mode := fs.String("mode", visionapi.ModeSystem, "event plane: system or user")
-	pollInterval := fs.Duration("poll-interval", 500*time.Millisecond, "unit snapshot poll interval")
+	readyFD := fs.Int("ready-fd", -1, "write a newline to this file descriptor after the initial snapshot is ready")
 	if err := fs.Parse(args); err != nil {
 		return config{}, err
 	}
@@ -104,8 +109,8 @@ func parseConfig(args []string, euid int) (config, error) {
 	if normalized == visionapi.ModeSystem && euid != 0 {
 		return config{}, fmt.Errorf("system mode requires root")
 	}
-	if *pollInterval <= 0 {
-		return config{}, fmt.Errorf("poll interval must be positive")
+	if *readyFD >= 0 && *readyFD < 3 {
+		return config{}, fmt.Errorf("ready fd must be at least 3")
 	}
 	uid := uint32(0)
 	if normalized == visionapi.ModeUser {
@@ -114,7 +119,7 @@ func parseConfig(args []string, euid int) (config, error) {
 		}
 		uid = uint32(euid)
 	}
-	return config{mode: normalized, uid: uid, pollInterval: *pollInterval}, nil
+	return config{mode: normalized, uid: uid, readyFD: *readyFD}, nil
 }
 
 func randomEpoch() (string, error) {
@@ -129,7 +134,7 @@ func newDaemon(cfg config, epoch string, logger *log.Logger) *daemon {
 	if logger == nil {
 		logger = log.New(io.Discard, "", 0)
 	}
-	return &daemon{
+	d := &daemon{
 		logger:           logger,
 		cfg:              cfg,
 		epoch:            epoch,
@@ -139,6 +144,12 @@ func newDaemon(cfg config, epoch string, logger *log.Logger) *daemon {
 		refreshCh:        make(chan struct{}, 1),
 		subscriberBuffer: 256,
 	}
+	if cfg.readyFD >= 3 {
+		d.readyWriter = os.NewFile(uintptr(cfg.readyFD), "sysvisiond-ready")
+	}
+	d.refreshUpstream = d.requestServicectlRefresh
+	d.fetchUnits = d.fetchServicectlUnits
+	return d
 }
 
 func newNormalizer(epoch string, uid uint32) *normalizer {
@@ -247,7 +258,7 @@ func (d *daemon) run() error {
 	}
 	errCh := make(chan error, 2)
 	go d.bridgeServicectlEvents()
-	go d.pollSnapshots()
+	go d.refreshSnapshotsLoop()
 	go func() { errCh <- d.listenNotifydIngress() }()
 	go func() { errCh <- d.serveAPI() }()
 	err := <-errCh
@@ -433,6 +444,19 @@ func (d *daemon) handleUnitsQuery(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
+	refresh := true
+	if values, present := r.URL.Query()["refresh"]; present {
+		refresh = len(values) == 0 || util.ExternalManagedValueEnabled(values[len(values)-1])
+	}
+	if refresh {
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+		if err := d.refreshSnapshots(ctx, true); err != nil {
+			w.WriteHeader(http.StatusBadGateway)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+	}
 	units, ready, errText := d.snapshot()
 	if !ready {
 		w.WriteHeader(http.StatusServiceUnavailable)
@@ -544,17 +568,18 @@ func (d *daemon) meta() visionapi.MetaResponse {
 	}
 }
 
-func (d *daemon) pollSnapshots() {
-	ticker := time.NewTicker(d.cfg.pollInterval)
-	defer ticker.Stop()
-	d.requestRefresh()
-	for {
-		select {
-		case <-ticker.C:
-			d.refreshSnapshots()
-		case <-d.refreshCh:
-			d.refreshSnapshots()
+func (d *daemon) refreshSnapshotsLoop() {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if err := d.refreshSnapshots(ctx, false); err != nil {
+		d.logger.Printf("initial snapshot refresh failed: %v", err)
+	}
+	cancel()
+	for range d.refreshCh {
+		ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+		if err := d.refreshSnapshots(ctx, false); err != nil {
+			d.logger.Printf("snapshot refresh failed: %v", err)
 		}
+		cancel()
 	}
 }
 
@@ -565,23 +590,19 @@ func (d *daemon) requestRefresh() {
 	}
 }
 
-func (d *daemon) refreshSnapshots() {
-	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
-	defer cancel()
-	resp, err := d.servicectlRequest(ctx, "/v1/units")
+func (d *daemon) refreshSnapshots(ctx context.Context, refreshUpstream bool) error {
+	d.refreshMu.Lock()
+	defer d.refreshMu.Unlock()
+	if refreshUpstream {
+		if err := d.refreshUpstream(ctx); err != nil {
+			d.setSnapshotError(err)
+			return err
+		}
+	}
+	upstream, err := d.fetchUnits(ctx)
 	if err != nil {
 		d.setSnapshotError(err)
-		return
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		d.setSnapshotError(fmt.Errorf("servicectl units returned %s", resp.Status))
-		return
-	}
-	var upstream visionapi.UnitsResponse
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&upstream); err != nil {
-		d.setSnapshotError(err)
-		return
+		return err
 	}
 	startTimes := make(map[int]uint64)
 	for _, unit := range upstream.Units {
@@ -603,9 +624,54 @@ func (d *daemon) refreshSnapshots() {
 	d.plane.snapshotReady = true
 	d.plane.snapshotErrorText = ""
 	d.mu.Unlock()
+	if err := d.notifyReady(); err != nil {
+		d.logger.Printf("notify readiness failed: %v", err)
+	}
 	for _, event := range events {
 		d.broadcast(event)
 	}
+	return nil
+}
+
+func (d *daemon) requestServicectlRefresh(ctx context.Context) error {
+	resp, err := d.servicectlRequestMethod(ctx, http.MethodPost, "/v1/refresh")
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("servicectl refresh returned %s", resp.Status)
+	}
+	return nil
+}
+
+func (d *daemon) fetchServicectlUnits(ctx context.Context) (visionapi.UnitsResponse, error) {
+	resp, err := d.servicectlRequest(ctx, "/v1/units")
+	if err != nil {
+		return visionapi.UnitsResponse{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return visionapi.UnitsResponse{}, fmt.Errorf("servicectl units returned %s", resp.Status)
+	}
+	var upstream visionapi.UnitsResponse
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&upstream); err != nil {
+		return visionapi.UnitsResponse{}, err
+	}
+	return upstream, nil
+}
+
+func (d *daemon) notifyReady() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.readySent || d.readyWriter == nil {
+		return nil
+	}
+	if _, err := io.WriteString(d.readyWriter, "\n"); err != nil {
+		return err
+	}
+	d.readySent = true
+	return nil
 }
 
 func (d *daemon) setSnapshotError(err error) {
@@ -633,6 +699,10 @@ func (d *daemon) unitSnapshot(name string) (visionapi.UnitSnapshot, bool, string
 }
 
 func (d *daemon) servicectlRequest(ctx context.Context, path string) (*http.Response, error) {
+	return d.servicectlRequestMethod(ctx, http.MethodGet, path)
+}
+
+func (d *daemon) servicectlRequestMethod(ctx context.Context, method, path string) (*http.Response, error) {
 	transport := &http.Transport{
 		DialContext: func(ctx context.Context, network string, addr string) (net.Conn, error) {
 			var dialer net.Dialer
@@ -640,7 +710,7 @@ func (d *daemon) servicectlRequest(ctx context.Context, path string) (*http.Resp
 		},
 	}
 	client := &http.Client{Transport: transport}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://unix"+path, nil)
+	req, err := http.NewRequestWithContext(ctx, method, "http://unix"+path, nil)
 	if err != nil {
 		return nil, err
 	}

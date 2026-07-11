@@ -106,6 +106,86 @@ func propertySet(key string, value string, persistent bool) error {
 	return nil
 }
 
+func propertySetEnabledUnit(unit string, present bool) error {
+	return propertyUnitListMembership("/v1/enabled-unit", visionapi.UnitListMembershipRequest{
+		Mode: config.Mode, Unit: strings.TrimSpace(unit), Present: present,
+	})
+}
+
+func propertySetEnabledGroup(group string, present bool) error {
+	return propertyUnitListMembership("/v1/enabled-group", visionapi.UnitListMembershipRequest{
+		Mode: config.Mode, Group: strings.TrimSpace(group), Present: present,
+	})
+}
+
+func propertyReplaceEnabledUnits(units []string) error {
+	return propertyReplaceUnitListForMode(config.Mode, "/v1/enabled-list", units)
+}
+
+func propertyReplaceRunnerUnits(units []string) error {
+	return propertyReplaceUnitListForMode(config.Mode, "/v1/runner-list", units)
+}
+
+func propertySetRunnerUnit(unit string, present bool) error {
+	return propertySetRunnerUnitForMode(config.Mode, unit, present)
+}
+
+func propertyUnitLists() (visionapi.UnitListsResponse, error) {
+	return propertyUnitListsForMode(config.Mode)
+}
+
+func propertyUnitListsForMode(mode string) (visionapi.UnitListsResponse, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	resp, err := propertyRequest(ctx, http.MethodGet, "/v1/unit-lists?mode="+url.QueryEscape(mode), nil)
+	if err != nil {
+		return visionapi.UnitListsResponse{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return visionapi.UnitListsResponse{}, fmt.Errorf("unit lists query returned %s", resp.Status)
+	}
+	var out visionapi.UnitListsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return visionapi.UnitListsResponse{}, err
+	}
+	return out, nil
+}
+
+func propertyReplaceUnitListForMode(mode string, path string, units []string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	resp, err := propertyRequest(ctx, http.MethodPut, path, visionapi.UnitListReplaceRequest{Mode: mode, Units: units})
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("unit list replacement returned %s", resp.Status)
+	}
+	return nil
+}
+
+func propertySetRunnerUnitForMode(mode, unit string, present bool) error {
+	return propertyUnitListMembership("/v1/runner-unit", visionapi.UnitListMembershipRequest{
+		Mode: mode, Unit: strings.TrimSpace(unit), Present: present,
+	})
+}
+
+func propertyUnitListMembership(path string, request visionapi.UnitListMembershipRequest) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	resp, err := propertyRequest(ctx, http.MethodPost, path, request)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("unit list update returned %s", resp.Status)
+	}
+	return nil
+}
+
 func propertyValue(key string) (string, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 	defer cancel()

@@ -1,6 +1,9 @@
 package main
 
 import (
+	"bytes"
+	"context"
+	"net/http/httptest"
 	"reflect"
 	"testing"
 
@@ -8,11 +11,11 @@ import (
 )
 
 func TestParseConfigRequiresOnePlane(t *testing.T) {
-	cfg, err := parseConfig([]string{"--mode=user"}, 1000)
+	cfg, err := parseConfig([]string{"--mode=user", "--ready-fd=3"}, 1000)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.mode != visionapi.ModeUser || cfg.uid != 1000 {
+	if cfg.mode != visionapi.ModeUser || cfg.uid != 1000 || cfg.readyFD != 3 {
 		t.Fatalf("config = %#v", cfg)
 	}
 	if _, err := parseConfig([]string{"--mode=invalid"}, 0); err == nil {
@@ -20,6 +23,56 @@ func TestParseConfigRequiresOnePlane(t *testing.T) {
 	}
 	if _, err := parseConfig([]string{"--mode=system"}, 1000); err == nil {
 		t.Fatal("unprivileged system mode accepted")
+	}
+	if _, err := parseConfig([]string{"--ready-fd=2"}, 0); err == nil {
+		t.Fatal("stdio ready fd accepted")
+	}
+}
+
+func TestNotifyReadyWritesOnce(t *testing.T) {
+	d := newDaemon(config{mode: visionapi.ModeSystem}, "epoch-a", nil)
+	var output bytes.Buffer
+	d.readyWriter = &output
+	d.notifyReady()
+	d.notifyReady()
+	if got := output.String(); got != "\n" {
+		t.Fatalf("ready notification = %q", got)
+	}
+}
+
+func TestUnitsQueryRefreshesUpstreamSynchronously(t *testing.T) {
+	d := newDaemon(config{mode: visionapi.ModeSystem}, "epoch-a", nil)
+	refreshed := false
+	d.refreshUpstream = func(context.Context) error {
+		refreshed = true
+		return nil
+	}
+	d.fetchUnits = func(context.Context) (visionapi.UnitsResponse, error) {
+		if !refreshed {
+			t.Fatal("units fetched before upstream refresh")
+		}
+		return visionapi.UnitsResponse{Units: []visionapi.UnitSnapshot{{Name: "demo.service", Mode: visionapi.ModeSystem}}}, nil
+	}
+	request := httptest.NewRequest("GET", "/v1/query/units", nil)
+	response := httptest.NewRecorder()
+	d.handleUnitsQuery(response, request)
+	if response.Code != 200 || !refreshed {
+		t.Fatalf("code=%d refreshed=%v body=%s", response.Code, refreshed, response.Body.String())
+	}
+}
+
+func TestUnitsQueryCanReadCacheWithoutRefresh(t *testing.T) {
+	d := newDaemon(config{mode: visionapi.ModeSystem}, "epoch-a", nil)
+	d.plane.snapshotReady = true
+	d.refreshUpstream = func(context.Context) error {
+		t.Fatal("cache query refreshed upstream")
+		return nil
+	}
+	request := httptest.NewRequest("GET", "/v1/query/units?refresh=0", nil)
+	response := httptest.NewRecorder()
+	d.handleUnitsQuery(response, request)
+	if response.Code != 200 {
+		t.Fatalf("code=%d body=%s", response.Code, response.Body.String())
 	}
 }
 

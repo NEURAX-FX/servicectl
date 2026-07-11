@@ -31,10 +31,7 @@ func enableGroupWithS6(group string) error {
 	if err := os.WriteFile(filepath.Join(serviceDir, "type"), []byte("longrun\n"), 0644); err != nil {
 		return err
 	}
-	runLine := sysOrchestrdBinaryPath()
-	if userMode() {
-		runLine += " --user"
-	}
+	runLine := s6OrchestrdRunPrefix()
 	runLine += " --group " + strings.TrimSpace(group)
 	runScript := strings.Join([]string{"#!/usr/bin/execlineb -P", runLine, ""}, "\n")
 	if err := os.WriteFile(filepath.Join(serviceDir, "run"), []byte(runScript), 0755); err != nil {

@@ -85,6 +85,15 @@ func TestOrchestrdServiceNameForGroupAndUnit(t *testing.T) {
 	}
 }
 
+func TestSysvisionUnitQueryPathUsesServiceStem(t *testing.T) {
+	if got := sysvisionUnitQueryPath("demo.service"); got != "/v1/query/unit/demo" {
+		t.Fatalf("query path = %q", got)
+	}
+	if got := sysvisionUnitQueryPath("already-raw"); got != "/v1/query/unit/already-raw" {
+		t.Fatalf("raw query path = %q", got)
+	}
+}
+
 func TestAttemptStartWithRetrySuppressedByFuse(t *testing.T) {
 	d := &daemon{
 		logger:      log.New(io.Discard, "", 0),

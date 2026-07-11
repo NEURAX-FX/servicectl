@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -23,9 +24,15 @@ type eventSubscriber struct {
 }
 
 type servicectlPlaneServer struct {
-	mode string
-	cfg  Config
-	hub  *servicectlEventHub
+	mode             string
+	cfg              Config
+	hub              *servicectlEventHub
+	mu               sync.Mutex
+	queryUnitLists   func(string) (visionapi.UnitListsResponse, error)
+	replaceUnitList  func(string, string, []string) error
+	scanRunnerUnits  func(Config) ([]string, error)
+	enabledUnits     func() []string
+	collectSnapshots func(Config, []string) visionapi.UnitsResponse
 }
 
 type servicectlEventHub struct {
@@ -33,6 +40,8 @@ type servicectlEventHub struct {
 	nextID int
 	subs   map[int]eventSubscriber
 }
+
+var unitSnapshotConfigMu sync.Mutex
 
 func newServicectlEventHub() *servicectlEventHub {
 	return &servicectlEventHub{subs: make(map[int]eventSubscriber)}
@@ -95,11 +104,16 @@ func (h *servicectlEventHub) serveIngress(mode string, socketPath string) error 
 		if strings.TrimSpace(event.Mode) == "" {
 			event.Mode = visionapi.PlaneForMode(mode).Mode
 		}
+		if present, ok := runnerEventUpdate(event); ok && strings.TrimSpace(event.Unit) != "" {
+			_ = propertySetRunnerUnitForMode(event.Mode, event.Unit, present)
+		}
 		h.publish(event)
 	}
 }
 
 func buildUnitSnapshot(cfg Config, unitName string) (visionapi.UnitSnapshot, error) {
+	unitSnapshotConfigMu.Lock()
+	defer unitSnapshotConfigMu.Unlock()
 	previous := config
 	config = cfg
 	defer func() {
@@ -185,8 +199,8 @@ func discoverSystemdUnits(cfg Config) []string {
 	return units
 }
 
-func collectUnitSnapshots(cfg Config) visionapi.UnitsResponse {
-	units := discoverSystemdUnits(cfg)
+func collectUnitSnapshots(cfg Config, units []string) visionapi.UnitsResponse {
+	units = normalizeUnitListNames(units)
 	result := visionapi.UnitsResponse{GeneratedAt: time.Now().UTC().Format(time.RFC3339Nano)}
 	result.Units = make([]visionapi.UnitSnapshot, 0, len(units))
 	for _, unitName := range units {
@@ -197,6 +211,58 @@ func collectUnitSnapshots(cfg Config) visionapi.UnitsResponse {
 		result.Units = append(result.Units, snapshot)
 	}
 	return result
+}
+
+func normalizeUnitListNames(units []string) []string {
+	seen := make(map[string]bool)
+	result := make([]string, 0, len(units))
+	for _, unit := range units {
+		unit = strings.TrimSuffix(strings.TrimSpace(unit), ".service")
+		if unit == "" || seen[unit] {
+			continue
+		}
+		seen[unit] = true
+		result = append(result, unit)
+	}
+	sort.Strings(result)
+	return result
+}
+
+func runnerEventUpdate(event visionapi.EventEnvelope) (bool, bool) {
+	if !strings.EqualFold(strings.TrimSpace(event.Payload["result"]), "ok") {
+		return false, false
+	}
+	switch strings.ToLower(strings.TrimSpace(event.Payload["action"])) {
+	case "start", "restart":
+		return true, true
+	case "stop":
+		return false, true
+	default:
+		return false, false
+	}
+}
+
+func scanRunnerUnits(cfg Config) ([]string, error) {
+	result := make([]string, 0)
+	for _, unit := range discoverSystemdUnits(cfg) {
+		snapshot, err := buildUnitSnapshot(cfg, unit)
+		if err == nil && snapshotIsRunning(snapshot) {
+			result = append(result, unit)
+		}
+	}
+	return normalizeUnitListNames(result), nil
+}
+
+func snapshotIsRunning(snapshot visionapi.UnitSnapshot) bool {
+	if strings.EqualFold(strings.TrimSpace(snapshot.State), "STARTED") {
+		return true
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(snapshot.MainPID))
+	if err != nil || pid <= 0 {
+		return false
+	}
+	_, err = os.Stat(filepath.Join("/proc", strconv.Itoa(pid)))
+	return err == nil
 }
 
 func writeEvent(w io.Writer, event visionapi.EventEnvelope) error {
@@ -224,20 +290,50 @@ func publishServicectlCommandEvent(action string, unitName string, result string
 
 func newServicectlPlaneServer(mode string, hub *servicectlEventHub) servicectlPlaneServer {
 	return servicectlPlaneServer{
-		mode: visionapi.PlaneForMode(mode).Mode,
-		cfg:  buildConfig(strings.EqualFold(strings.TrimSpace(mode), visionapi.ModeUser)),
-		hub:  hub,
+		mode:             visionapi.PlaneForMode(mode).Mode,
+		cfg:              buildConfig(strings.EqualFold(strings.TrimSpace(mode), visionapi.ModeUser)),
+		hub:              hub,
+		queryUnitLists:   propertyUnitListsForMode,
+		replaceUnitList:  propertyReplaceUnitListForMode,
+		scanRunnerUnits:  scanRunnerUnits,
+		enabledUnits:     enabledStandaloneServicesFromS6Bundle,
+		collectSnapshots: collectUnitSnapshots,
 	}
 }
 
-func (s servicectlPlaneServer) handler() http.Handler {
+func (s *servicectlPlaneServer) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/units", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
-		util.WriteJSON(w, collectUnitSnapshots(s.cfg))
+		if util.ExternalManagedValueEnabled(r.URL.Query().Get("refresh")) {
+			if err := s.refreshPropertyLists(); err != nil {
+				w.WriteHeader(http.StatusBadGateway)
+				util.WriteJSON(w, map[string]string{"error": err.Error()})
+				return
+			}
+		}
+		lists, err := s.queryUnitLists(s.mode)
+		if err != nil {
+			w.WriteHeader(http.StatusBadGateway)
+			util.WriteJSON(w, map[string]string{"error": err.Error()})
+			return
+		}
+		util.WriteJSON(w, s.collectSnapshots(s.cfg, lists.EffectiveUnits))
+	})
+	mux.HandleFunc("/v1/refresh", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		if err := s.refreshPropertyLists(); err != nil {
+			w.WriteHeader(http.StatusBadGateway)
+			util.WriteJSON(w, map[string]string{"error": err.Error()})
+			return
+		}
+		util.WriteJSON(w, map[string]string{"result": "ok"})
 	})
 	mux.HandleFunc("/v1/events", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -300,15 +396,37 @@ func (s servicectlPlaneServer) handler() http.Handler {
 	return mux
 }
 
-func (s servicectlPlaneServer) apiSocketPath() string {
+func (s *servicectlPlaneServer) refreshPropertyLists() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	lists, err := s.queryUnitLists(s.mode)
+	if err != nil {
+		return fmt.Errorf("query unit lists: %w", err)
+	}
+	if !lists.EnabledInitialized {
+		if err := s.replaceUnitList(s.mode, "/v1/enabled-list", s.enabledUnits()); err != nil {
+			return fmt.Errorf("initialize enabled list: %w", err)
+		}
+	}
+	runners, err := s.scanRunnerUnits(s.cfg)
+	if err != nil {
+		return fmt.Errorf("scan runner list: %w", err)
+	}
+	if err := s.replaceUnitList(s.mode, "/v1/runner-list", runners); err != nil {
+		return fmt.Errorf("refresh runner list: %w", err)
+	}
+	return nil
+}
+
+func (s *servicectlPlaneServer) apiSocketPath() string {
 	return visionapi.ServicectlSocketPathForMode(s.mode)
 }
 
-func (s servicectlPlaneServer) ingressSocketPath() string {
+func (s *servicectlPlaneServer) ingressSocketPath() string {
 	return visionapi.ServicectlEventsSocketPathForMode(s.mode)
 }
 
-func (s servicectlPlaneServer) serveIngress() error {
+func (s *servicectlPlaneServer) serveIngress() error {
 	for {
 		if err := s.hub.serveIngress(s.mode, s.ingressSocketPath()); err != nil {
 			fmt.Println(oneLineError(s.mode+" servicectl event ingress failed", err))
@@ -317,7 +435,7 @@ func (s servicectlPlaneServer) serveIngress() error {
 	}
 }
 
-func (s servicectlPlaneServer) serveAPI() error {
+func (s *servicectlPlaneServer) serveAPI() error {
 	socketPath := s.apiSocketPath()
 	if err := os.MkdirAll(filepath.Dir(socketPath), 0755); err != nil {
 		return fmt.Errorf("create servicectl runtime directory: %w", err)
@@ -354,6 +472,10 @@ func selectedServicectlPlane(hub *servicectlEventHub) servicectlPlaneServer {
 func servicectlAPIServer() int {
 	hub := newServicectlEventHub()
 	server := selectedServicectlPlane(hub)
+	if err := server.refreshPropertyLists(); err != nil {
+		fmt.Println(oneLineError("initialize servicectl unit lists", err))
+		return 1
+	}
 	errCh := make(chan error, 2)
 	go func() { errCh <- server.serveIngress() }()
 	go func() { errCh <- server.serveAPI() }()

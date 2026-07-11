@@ -35,12 +35,16 @@ type definitionSet struct {
 }
 
 type daemon struct {
-	runtimeDir string
-	statePath  string
-	logger     *syncLogger
-	mu         sync.Mutex
-	store      propertyStore
-	defsByMode map[string]definitionSet
+	runtimeDir          string
+	statePath           string
+	logger              *syncLogger
+	mu                  sync.Mutex
+	store               propertyStore
+	defsByMode          map[string]definitionSet
+	enabledUnitsByMode  map[string]map[string]bool
+	enabledGroupsByMode map[string]map[string]bool
+	runnerUnitsByMode   map[string]map[string]bool
+	enabledInitialized  map[string]bool
 }
 
 type propertyUpdateRequest struct {
@@ -83,11 +87,226 @@ func main() {
 			visionapi.ModeSystem: {Groups: map[string]groupDefinition{}, Targets: map[string]string{}},
 			visionapi.ModeUser:   {Groups: map[string]groupDefinition{}, Targets: map[string]string{}},
 		},
+		enabledUnitsByMode: map[string]map[string]bool{
+			visionapi.ModeSystem: {},
+			visionapi.ModeUser:   {},
+		},
+		enabledGroupsByMode: map[string]map[string]bool{
+			visionapi.ModeSystem: {},
+			visionapi.ModeUser:   {},
+		},
+		runnerUnitsByMode: map[string]map[string]bool{
+			visionapi.ModeSystem: {},
+			visionapi.ModeUser:   {},
+		},
+		enabledInitialized: map[string]bool{},
 	}
 	if err := d.run(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+func (d *daemon) setEnabledUnit(mode, unit string, enabled bool) error {
+	mode, err := normalizeMode(mode)
+	if err != nil {
+		return err
+	}
+	unit = normalizeUnitName(unit)
+	if unit == "" {
+		return fmt.Errorf("unit is required")
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	changed := d.enabledUnitsLocked(mode)[unit] != enabled
+	initialized := d.enabledInitialized[mode]
+	if !changed && initialized {
+		return nil
+	}
+	d.enabledInitialized[mode] = true
+	setMembership(d.enabledUnitsLocked(mode), unit, enabled)
+	if err := d.saveStateLocked(); err != nil {
+		return err
+	}
+	d.publishModeLocked(mode, visionapi.KindUnitListChanged, map[string]string{"list": "enabled", "unit": unit, "present": util.YesNo(enabled)})
+	return nil
+}
+
+func (d *daemon) replaceEnabledList(mode string, units []string) error {
+	mode, err := normalizeMode(mode)
+	if err != nil {
+		return err
+	}
+	replacement := make(map[string]bool)
+	for _, unit := range units {
+		if normalized := normalizeUnitName(unit); normalized != "" {
+			replacement[normalized] = true
+		}
+	}
+	d.mu.Lock()
+	changed := !membershipEqual(d.enabledUnitsLocked(mode), replacement)
+	initialized := d.enabledInitialized[mode]
+	if !changed && initialized {
+		d.mu.Unlock()
+		return nil
+	}
+	d.enabledInitialized[mode] = true
+	d.enabledUnitsByMode[mode] = replacement
+	if err := d.saveStateLocked(); err != nil {
+		d.mu.Unlock()
+		return err
+	}
+	d.publishModeLocked(mode, visionapi.KindUnitListChanged, map[string]string{"list": "enabled", "replace": "yes"})
+	d.mu.Unlock()
+	return nil
+}
+
+func (d *daemon) setEnabledGroup(mode, group string, enabled bool) error {
+	mode, err := normalizeMode(mode)
+	if err != nil {
+		return err
+	}
+	group = strings.TrimSpace(group)
+	if group == "" {
+		return fmt.Errorf("group is required")
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	changed := d.enabledGroupsLocked(mode)[group] != enabled
+	initialized := d.enabledInitialized[mode]
+	if !changed && initialized {
+		return nil
+	}
+	d.enabledInitialized[mode] = true
+	delete(d.store.Persistent, "persist.group."+group)
+	setMembership(d.enabledGroupsLocked(mode), group, enabled)
+	if err := d.saveStateLocked(); err != nil {
+		return err
+	}
+	d.publishModeLocked(mode, visionapi.KindUnitListChanged, map[string]string{"list": "enabled-groups", "group": group, "present": util.YesNo(enabled)})
+	return nil
+}
+
+func (d *daemon) replaceRunnerList(mode string, units []string) error {
+	mode, err := normalizeMode(mode)
+	if err != nil {
+		return err
+	}
+	replacement := make(map[string]bool)
+	for _, unit := range units {
+		if normalized := normalizeUnitName(unit); normalized != "" {
+			replacement[normalized] = true
+		}
+	}
+	d.mu.Lock()
+	if membershipEqual(d.runnerUnitsLocked(mode), replacement) {
+		d.mu.Unlock()
+		return nil
+	}
+	d.runnerUnitsByMode[mode] = replacement
+	d.publishModeLocked(mode, visionapi.KindUnitListChanged, map[string]string{"list": "runner", "replace": "yes"})
+	d.mu.Unlock()
+	return nil
+}
+
+func (d *daemon) setRunnerUnit(mode, unit string, running bool) error {
+	mode, err := normalizeMode(mode)
+	if err != nil {
+		return err
+	}
+	unit = normalizeUnitName(unit)
+	if unit == "" {
+		return fmt.Errorf("unit is required")
+	}
+	d.mu.Lock()
+	if d.runnerUnitsLocked(mode)[unit] == running {
+		d.mu.Unlock()
+		return nil
+	}
+	setMembership(d.runnerUnitsLocked(mode), unit, running)
+	d.publishModeLocked(mode, visionapi.KindUnitListChanged, map[string]string{"list": "runner", "unit": unit, "present": util.YesNo(running)})
+	d.mu.Unlock()
+	return nil
+}
+
+func (d *daemon) unitLists(mode string) visionapi.UnitListsResponse {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	enabledUnits := sortedMembership(d.enabledUnitsLocked(mode))
+	enabledGroups := sortedMembership(d.enabledGroupsLocked(mode))
+	runnerUnits := sortedMembership(d.runnerUnitsLocked(mode))
+	effective := make(map[string]bool, len(enabledUnits)+len(runnerUnits))
+	for _, unit := range enabledUnits {
+		effective[unit] = true
+	}
+	for _, unit := range runnerUnits {
+		effective[unit] = true
+	}
+	definitions := d.definitionsLocked(mode)
+	for _, group := range enabledGroups {
+		for _, unit := range definitions.Groups[group].Units {
+			if normalized := normalizeUnitName(unit); normalized != "" {
+				effective[normalized] = true
+			}
+		}
+	}
+	return visionapi.UnitListsResponse{
+		Mode: mode, EnabledInitialized: d.enabledInitialized[mode], EnabledUnits: enabledUnits, EnabledGroups: enabledGroups,
+		RunnerUnits: runnerUnits, EffectiveUnits: sortedMembership(effective),
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339Nano),
+	}
+}
+
+func (d *daemon) enabledUnitsLocked(mode string) map[string]bool {
+	if d.enabledUnitsByMode[mode] == nil {
+		d.enabledUnitsByMode[mode] = make(map[string]bool)
+	}
+	return d.enabledUnitsByMode[mode]
+}
+
+func (d *daemon) enabledGroupsLocked(mode string) map[string]bool {
+	if d.enabledGroupsByMode[mode] == nil {
+		d.enabledGroupsByMode[mode] = make(map[string]bool)
+	}
+	return d.enabledGroupsByMode[mode]
+}
+
+func (d *daemon) runnerUnitsLocked(mode string) map[string]bool {
+	if d.runnerUnitsByMode[mode] == nil {
+		d.runnerUnitsByMode[mode] = make(map[string]bool)
+	}
+	return d.runnerUnitsByMode[mode]
+}
+
+func setMembership(values map[string]bool, name string, present bool) {
+	if present {
+		values[name] = true
+	} else {
+		delete(values, name)
+	}
+}
+
+func membershipEqual(left, right map[string]bool) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for name, present := range left {
+		if present != right[name] {
+			return false
+		}
+	}
+	return true
+}
+
+func sortedMembership(values map[string]bool) []string {
+	result := make([]string, 0, len(values))
+	for name, present := range values {
+		if present {
+			result = append(result, name)
+		}
+	}
+	sort.Strings(result)
+	return result
 }
 
 func (d *daemon) run() error {
@@ -119,6 +338,11 @@ func (d *daemon) run() error {
 		_ = os.Remove(socketPath)
 	}()
 	_ = os.Chmod(socketPath, 0660)
+	server := &http.Server{Handler: d.handler()}
+	return server.Serve(listener)
+}
+
+func (d *daemon) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/properties", d.handleProperties)
 	mux.HandleFunc("/v1/groups", d.handleGroups)
@@ -127,8 +351,116 @@ func (d *daemon) run() error {
 	mux.HandleFunc("/v1/resolve-target", d.handleResolveTarget)
 	mux.HandleFunc("/v1/reload", d.handleReload)
 	mux.HandleFunc("/v1/property", d.handlePropertyUpdate)
-	server := &http.Server{Handler: mux}
-	return server.Serve(listener)
+	mux.HandleFunc("/v1/unit-lists", d.handleUnitLists)
+	mux.HandleFunc("/v1/enabled-list", d.handleEnabledList)
+	mux.HandleFunc("/v1/enabled-unit", d.handleEnabledUnit)
+	mux.HandleFunc("/v1/enabled-group", d.handleEnabledGroup)
+	mux.HandleFunc("/v1/runner-list", d.handleRunnerList)
+	mux.HandleFunc("/v1/runner-unit", d.handleRunnerUnit)
+	return mux
+}
+
+func (d *daemon) handleEnabledList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var request visionapi.UnitListReplaceRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		writePropertyError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := d.replaceEnabledList(request.Mode, request.Units); err != nil {
+		writePropertyError(w, http.StatusBadRequest, err)
+		return
+	}
+	util.WriteJSON(w, map[string]string{"result": "ok"})
+}
+
+func (d *daemon) handleUnitLists(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	mode, err := requestMode(r)
+	if err != nil {
+		writePropertyError(w, http.StatusBadRequest, err)
+		return
+	}
+	util.WriteJSON(w, d.unitLists(mode))
+}
+
+func (d *daemon) handleEnabledUnit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var request visionapi.UnitListMembershipRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		writePropertyError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := d.setEnabledUnit(request.Mode, request.Unit, request.Present); err != nil {
+		writePropertyError(w, http.StatusBadRequest, err)
+		return
+	}
+	util.WriteJSON(w, map[string]string{"result": "ok"})
+}
+
+func (d *daemon) handleEnabledGroup(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var request visionapi.UnitListMembershipRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		writePropertyError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := d.setEnabledGroup(request.Mode, request.Group, request.Present); err != nil {
+		writePropertyError(w, http.StatusBadRequest, err)
+		return
+	}
+	util.WriteJSON(w, map[string]string{"result": "ok"})
+}
+
+func (d *daemon) handleRunnerList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var request visionapi.UnitListReplaceRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		writePropertyError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := d.replaceRunnerList(request.Mode, request.Units); err != nil {
+		writePropertyError(w, http.StatusBadRequest, err)
+		return
+	}
+	util.WriteJSON(w, map[string]string{"result": "ok"})
+}
+
+func (d *daemon) handleRunnerUnit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var request visionapi.UnitListMembershipRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		writePropertyError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := d.setRunnerUnit(request.Mode, request.Unit, request.Present); err != nil {
+		writePropertyError(w, http.StatusBadRequest, err)
+		return
+	}
+	util.WriteJSON(w, map[string]string{"result": "ok"})
+}
+
+func writePropertyError(w http.ResponseWriter, status int, err error) {
+	w.WriteHeader(status)
+	util.WriteJSON(w, map[string]string{"error": err.Error()})
 }
 
 func (d *daemon) handleReload(w http.ResponseWriter, r *http.Request) {
@@ -327,6 +659,25 @@ func (d *daemon) setProperty(key string, value string, persistent bool, mode str
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if persistent && strings.HasPrefix(key, "persist.group.") {
+		group := strings.TrimPrefix(key, "persist.group.")
+		enabled := util.ExternalManagedValueEnabled(value)
+		setMembership(d.enabledGroupsLocked(visionapi.ModeSystem), group, enabled)
+		setMembership(d.enabledGroupsLocked(visionapi.ModeUser), group, enabled)
+		d.enabledInitialized[visionapi.ModeSystem] = true
+		d.enabledInitialized[visionapi.ModeUser] = true
+		delete(d.store.Persistent, key)
+		if err := d.saveStateLocked(); err != nil {
+			return err
+		}
+		if enabled {
+			value = "1"
+		} else {
+			value = "0"
+		}
+		d.publishPropertyChangeLocked(key, value, true, mode)
+		return nil
+	}
 	store := d.store.Persistent
 	if !persistent {
 		store = d.runtimeStateLocked(mode)
@@ -365,6 +716,29 @@ func (d *daemon) loadState() error {
 		key := strings.TrimSpace(parts[0])
 		value := strings.TrimSpace(parts[1])
 		switch {
+		case strings.HasPrefix(key, "enable.system.unit."):
+			d.enabledInitialized[visionapi.ModeSystem] = true
+			d.enabledUnitsLocked(visionapi.ModeSystem)[strings.TrimPrefix(key, "enable.system.unit.")] = util.ExternalManagedValueEnabled(value)
+		case strings.HasPrefix(key, "enable.user.unit."):
+			d.enabledInitialized[visionapi.ModeUser] = true
+			d.enabledUnitsLocked(visionapi.ModeUser)[strings.TrimPrefix(key, "enable.user.unit.")] = util.ExternalManagedValueEnabled(value)
+		case strings.HasPrefix(key, "enable.system.group."):
+			d.enabledInitialized[visionapi.ModeSystem] = true
+			d.enabledGroupsLocked(visionapi.ModeSystem)[strings.TrimPrefix(key, "enable.system.group.")] = util.ExternalManagedValueEnabled(value)
+		case strings.HasPrefix(key, "enable.user.group."):
+			d.enabledInitialized[visionapi.ModeUser] = true
+			d.enabledGroupsLocked(visionapi.ModeUser)[strings.TrimPrefix(key, "enable.user.group.")] = util.ExternalManagedValueEnabled(value)
+		case strings.HasPrefix(key, "persist.group."):
+			group := strings.TrimPrefix(key, "persist.group.")
+			enabled := util.ExternalManagedValueEnabled(value)
+			d.enabledGroupsLocked(visionapi.ModeSystem)[group] = enabled
+			d.enabledGroupsLocked(visionapi.ModeUser)[group] = enabled
+			d.enabledInitialized[visionapi.ModeSystem] = true
+			d.enabledInitialized[visionapi.ModeUser] = true
+		case key == "enable.system.initialized":
+			d.enabledInitialized[visionapi.ModeSystem] = util.ExternalManagedValueEnabled(value)
+		case key == "enable.user.initialized":
+			d.enabledInitialized[visionapi.ModeUser] = util.ExternalManagedValueEnabled(value)
 		case strings.HasPrefix(key, "persist."):
 			d.store.Persistent[key] = value
 		case strings.HasPrefix(key, "prop.system."):
@@ -389,6 +763,18 @@ func (d *daemon) saveStateLocked() error {
 	for _, key := range sortedMapKeys(d.runtimeStateLocked(visionapi.ModeUser)) {
 		lines = append(lines, "prop.user."+key+"="+d.runtimeStateLocked(visionapi.ModeUser)[key])
 	}
+	for _, mode := range []string{visionapi.ModeSystem, visionapi.ModeUser} {
+		if d.enabledInitialized[mode] {
+			lines = append(lines, "enable."+mode+".initialized=1")
+		}
+		for _, unit := range sortedMembership(d.enabledUnitsLocked(mode)) {
+			lines = append(lines, "enable."+mode+".unit."+unit+"=1")
+		}
+		for _, group := range sortedMembership(d.enabledGroupsLocked(mode)) {
+			lines = append(lines, "enable."+mode+".group."+group+"=1")
+		}
+	}
+	sort.Strings(lines)
 	content := strings.Join(lines, "\n")
 	if content != "" {
 		content += "\n"
@@ -622,8 +1008,10 @@ func (d *daemon) groupStateLocked(mode string, name string) visionapi.GroupState
 	value := strings.TrimSpace(d.runtimeStateLocked(mode)["prop.group."+name])
 	persistent := false
 	if value == "" {
-		value = strings.TrimSpace(d.store.Persistent["persist.group."+name])
-		persistent = value != ""
+		if d.enabledGroupsLocked(mode)[name] {
+			value = "1"
+			persistent = true
+		}
 	}
 	return visionapi.GroupState{
 		Name:       name,

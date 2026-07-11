@@ -32,6 +32,7 @@ const (
 	KindUnitQuery              = "unit.query"
 	KindPropertyChanged        = "property.changed"
 	KindGroupChanged           = "group.changed"
+	KindUnitListChanged        = "unit-list.changed"
 	LifecycleUnknown           = "unknown"
 	LifecycleReady             = "ready"
 	LifecycleStopped           = "stopped"
@@ -242,6 +243,28 @@ type UnitGroupsResponse struct {
 type UnitsResponse struct {
 	GeneratedAt string         `json:"generated_at"`
 	Units       []UnitSnapshot `json:"units"`
+}
+
+type UnitListsResponse struct {
+	Mode               string   `json:"mode"`
+	EnabledInitialized bool     `json:"enabled_initialized"`
+	EnabledUnits       []string `json:"enabled_units"`
+	EnabledGroups      []string `json:"enabled_groups"`
+	RunnerUnits        []string `json:"runner_units"`
+	EffectiveUnits     []string `json:"effective_units"`
+	GeneratedAt        string   `json:"generated_at"`
+}
+
+type UnitListReplaceRequest struct {
+	Mode  string   `json:"mode"`
+	Units []string `json:"units"`
+}
+
+type UnitListMembershipRequest struct {
+	Mode    string `json:"mode"`
+	Unit    string `json:"unit,omitempty"`
+	Group   string `json:"group,omitempty"`
+	Present bool   `json:"present"`
 }
 
 type EventEnvelope struct {

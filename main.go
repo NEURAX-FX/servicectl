@@ -1507,7 +1507,7 @@ parsedFlags:
 			return
 		}
 	}
-	if groupFlag == "" && len(args) == 1 && args[0] != "list" && args[0] != "serve-api" && args[0] != "version" && args[0] != "cgroup" {
+	if groupFlag == "" && len(args) == 1 && args[0] != "list" && args[0] != "serve-api" && args[0] != "ensure-s6" && args[0] != "version" && args[0] != "cgroup" {
 		printHelp()
 		return
 	}
@@ -1531,6 +1531,17 @@ parsedFlags:
 	}
 	if action == "serve-api" {
 		os.Exit(servicectlAPIServer())
+	}
+	if action == "ensure-s6" {
+		if len(targets) != 0 {
+			fmt.Println("Usage: servicectl ensure-s6")
+			os.Exit(1)
+		}
+		if err := ensureS6CoreServices(); err != nil {
+			fmt.Println(oneLineError("ensure s6 services", err))
+			os.Exit(1)
+		}
+		return
 	}
 	if action == "activate-dbus" {
 		if len(targets) != 1 {
@@ -1750,10 +1761,20 @@ parsedFlags:
 				exitCode = 1
 				continue
 			}
+			if err := propertySetEnabledUnit(cleanName, true); err != nil {
+				fmt.Println(oneLineError("persist enabled unit", err))
+				exitCode = 1
+				continue
+			}
 			fmt.Printf("Enabled %s\n", cleanName)
 		case "disable":
 			if err := disableWithS6(cleanName); err != nil {
 				fmt.Println(oneLineError("disable unit with s6", err))
+				exitCode = 1
+				continue
+			}
+			if err := propertySetEnabledUnit(cleanName, false); err != nil {
+				fmt.Println(oneLineError("persist disabled unit", err))
 				exitCode = 1
 				continue
 			}

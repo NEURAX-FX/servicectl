@@ -130,23 +130,23 @@ func handleGroupAction(action string, target groupActionTarget) (int, bool) {
 	}
 	switch action {
 	case "enable":
-		if err := propertySet("persist.group."+target.group, "1", true); err != nil {
-			fmt.Println(oneLineError("enable group", err))
-			return 1, true
-		}
 		if err := enableGroupWithS6(target.group); err != nil {
 			fmt.Println(oneLineError("enable group with s6", err))
+			return 1, true
+		}
+		if err := propertySetEnabledGroup(target.group, true); err != nil {
+			fmt.Println(oneLineError("persist enabled group", err))
 			return 1, true
 		}
 		fmt.Printf("Enabled group:%s\n", target.group)
 		return 0, true
 	case "disable":
-		if err := propertySet("persist.group."+target.group, "0", true); err != nil {
-			fmt.Println(oneLineError("disable group", err))
-			return 1, true
-		}
 		if err := disableGroupWithS6(target.group); err != nil {
 			fmt.Println(oneLineError("disable group with s6", err))
+			return 1, true
+		}
+		if err := propertySetEnabledGroup(target.group, false); err != nil {
+			fmt.Println(oneLineError("persist disabled group", err))
 			return 1, true
 		}
 		for _, unit := range state.Units {

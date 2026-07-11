@@ -283,6 +283,7 @@ func TestUserActivationGateReady(t *testing.T) {
 
 func TestEnsureS6BundleUsesOnePlaneInUserMode(t *testing.T) {
 	tmp := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", "/tmp/session-runtime")
 	previousConfig := config
 	previousPaths := testS6PathsOverride
 	t.Cleanup(func() {
@@ -312,8 +313,21 @@ func TestEnsureS6BundleUsesOnePlaneInUserMode(t *testing.T) {
 	if !strings.Contains(string(apiRun), "servicectl --user serve-api") {
 		t.Fatalf("API run script = %q", apiRun)
 	}
-	if !strings.Contains(string(visionRun), "sysvisiond --mode=user") {
+	if !strings.Contains(string(apiRun), "XDG_RUNTIME_DIR=/tmp/session-runtime") {
+		t.Fatalf("API run script does not preserve the session runtime dir: %q", apiRun)
+	}
+	if !strings.Contains(string(visionRun), "sysvisiond --mode=user --ready-fd=3") {
 		t.Fatalf("sysvisiond run script = %q", visionRun)
+	}
+	if !strings.Contains(string(visionRun), "XDG_RUNTIME_DIR=/tmp/session-runtime") {
+		t.Fatalf("sysvisiond run script does not preserve the session runtime dir: %q", visionRun)
+	}
+	readyFD, err := os.ReadFile(filepath.Join(s6SysvisiondSourceDir(), "notification-fd"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(readyFD) != "3\n" {
+		t.Fatalf("notification fd = %q", readyFD)
 	}
 	if s6SysvisiondServiceName() != "sysvisiond-user-0" {
 		t.Fatalf("user sysvisiond service name = %q", s6SysvisiondServiceName())
@@ -330,6 +344,212 @@ func TestEnsureS6BundleUsesOnePlaneInUserMode(t *testing.T) {
 	}
 	if _, err := os.Stat(s6SysPropertydSourceDir()); !os.IsNotExist(err) {
 		t.Fatalf("user mode created sys-propertyd source: %v", err)
+	}
+	if _, err := os.Stat(s6SysCgroupdSourceDir()); !os.IsNotExist(err) {
+		t.Fatalf("user mode created sys-cgroupd source: %v", err)
+	}
+}
+
+func TestEnsureS6BundleIncludesSystemCgroupd(t *testing.T) {
+	tmp := t.TempDir()
+	previousConfig := config
+	previousPaths := testS6PathsOverride
+	t.Cleanup(func() {
+		config = previousConfig
+		testS6PathsOverride = previousPaths
+	})
+	config = buildConfig(false)
+	testS6PathsOverride = &s6PlanePaths{
+		SourceRoot:      filepath.Join(tmp, "s6", "rc"),
+		CompiledDir:     filepath.Join(tmp, "run", "s6", "compiled.servicectl"),
+		LiveDir:         filepath.Join(tmp, "run", "s6", "state"),
+		BundleDir:       filepath.Join(tmp, "s6", "rc", s6BundleName()),
+		BundleContents:  filepath.Join(tmp, "s6", "rc", s6BundleName(), "contents"),
+		DefaultContents: filepath.Join(tmp, "s6", "rc", "default", "contents"),
+	}
+	if err := ensureS6Bundle(); err != nil {
+		t.Fatal(err)
+	}
+	run, err := os.ReadFile(filepath.Join(s6SysCgroupdSourceDir(), "run"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(run), "sys-cgroupd") {
+		t.Fatalf("sys-cgroupd run script = %q", run)
+	}
+	dependencies, err := os.ReadFile(filepath.Join(s6SysCgroupdSourceDir(), "dependencies"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(dependencies) != "sysvisiond\n" {
+		t.Fatalf("sys-cgroupd dependencies = %q", dependencies)
+	}
+	defaultContents, err := os.ReadFile(s6DefaultContentsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsString(uniqueLinesPreserveOrder(string(defaultContents)), s6SysCgroupdServiceName()) {
+		t.Fatalf("default contents = %q", defaultContents)
+	}
+}
+
+func TestEnsureS6CoreServicesOnlyCompilesWithoutLiveGraph(t *testing.T) {
+	tmp := t.TempDir()
+	previousConfig := config
+	previousPaths := testS6PathsOverride
+	previousAvailable := s6AvailableFunc
+	previousCommandOutput := commandOutputFunc
+	t.Cleanup(func() {
+		config = previousConfig
+		testS6PathsOverride = previousPaths
+		s6AvailableFunc = previousAvailable
+		commandOutputFunc = previousCommandOutput
+	})
+	config = buildConfig(false)
+	testS6PathsOverride = &s6PlanePaths{
+		SourceRoot:      filepath.Join(tmp, "s6", "rc"),
+		CompiledDir:     filepath.Join(tmp, "run", "s6", "compiled.servicectl"),
+		LiveDir:         filepath.Join(tmp, "run", "s6", "state"),
+		BundleDir:       filepath.Join(tmp, "s6", "rc", s6BundleName()),
+		BundleContents:  filepath.Join(tmp, "s6", "rc", s6BundleName(), "contents"),
+		DefaultContents: filepath.Join(tmp, "s6", "rc", "default", "contents"),
+	}
+	s6AvailableFunc = func() bool { return true }
+	commands := make([]string, 0, 1)
+	commandOutputFunc = func(name string, args ...string) (string, int, error) {
+		commands = append(commands, strings.Join(append([]string{name}, args...), " "))
+		return "", 0, nil
+	}
+
+	if err := ensureS6CoreServices(); err != nil {
+		t.Fatal(err)
+	}
+	if len(commands) != 1 || !strings.Contains(commands[0], "s6-rc-compile") {
+		t.Fatalf("commands = %#v", commands)
+	}
+}
+
+func TestEnsureS6CoreServicesBootstrapsMissingSourceRoot(t *testing.T) {
+	tmp := t.TempDir()
+	previousConfig := config
+	previousPaths := testS6PathsOverride
+	previousAvailable := s6AvailableFunc
+	previousCommandOutput := commandOutputFunc
+	t.Cleanup(func() {
+		config = previousConfig
+		testS6PathsOverride = previousPaths
+		s6AvailableFunc = previousAvailable
+		commandOutputFunc = previousCommandOutput
+	})
+	config = buildConfig(false)
+	testS6PathsOverride = &s6PlanePaths{
+		SourceRoot:      filepath.Join(tmp, "missing", "s6", "rc"),
+		CompiledDir:     filepath.Join(tmp, "run", "s6", "compiled.servicectl"),
+		LiveDir:         filepath.Join(tmp, "run", "s6", "state"),
+		BundleDir:       filepath.Join(tmp, "missing", "s6", "rc", s6BundleName()),
+		BundleContents:  filepath.Join(tmp, "missing", "s6", "rc", s6BundleName(), "contents"),
+		DefaultContents: filepath.Join(tmp, "missing", "s6", "rc", "default", "contents"),
+	}
+	s6AvailableFunc = func() bool { return false }
+	commandOutputFunc = func(name string, args ...string) (string, int, error) {
+		return "", 0, nil
+	}
+
+	if err := ensureS6CoreServices(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(s6SysCgroupdSourceDir()); err != nil {
+		t.Fatalf("sys-cgroupd source was not bootstrapped: %v", err)
+	}
+}
+
+func TestEnsureS6CoreServicesUpdatesThenStartsCgroupd(t *testing.T) {
+	tmp := t.TempDir()
+	previousConfig := config
+	previousPaths := testS6PathsOverride
+	previousAvailable := s6AvailableFunc
+	previousCommandOutput := commandOutputFunc
+	t.Cleanup(func() {
+		config = previousConfig
+		testS6PathsOverride = previousPaths
+		s6AvailableFunc = previousAvailable
+		commandOutputFunc = previousCommandOutput
+	})
+	config = buildConfig(false)
+	testS6PathsOverride = &s6PlanePaths{
+		SourceRoot:      filepath.Join(tmp, "s6", "rc"),
+		CompiledDir:     filepath.Join(tmp, "run", "s6", "compiled.servicectl"),
+		LiveDir:         filepath.Join(tmp, "run", "s6", "state"),
+		BundleDir:       filepath.Join(tmp, "s6", "rc", s6BundleName()),
+		BundleContents:  filepath.Join(tmp, "s6", "rc", s6BundleName(), "contents"),
+		DefaultContents: filepath.Join(tmp, "s6", "rc", "default", "contents"),
+	}
+	if err := os.MkdirAll(testS6PathsOverride.LiveDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s6AvailableFunc = func() bool { return true }
+	commands := make([]string, 0, 3)
+	commandOutputFunc = func(name string, args ...string) (string, int, error) {
+		commands = append(commands, strings.Join(append([]string{name}, args...), " "))
+		return "", 0, nil
+	}
+
+	if err := ensureS6CoreServices(); err != nil {
+		t.Fatal(err)
+	}
+	if len(commands) != 3 {
+		t.Fatalf("commands = %#v", commands)
+	}
+	if !strings.Contains(commands[0], "s6-rc-compile") || !strings.Contains(commands[1], "s6-rc-update") {
+		t.Fatalf("commands = %#v", commands)
+	}
+	if !strings.Contains(commands[2], "s6-rc") || !strings.HasSuffix(commands[2], "change sys-cgroupd") {
+		t.Fatalf("start command = %q", commands[2])
+	}
+}
+
+func TestUserOrchestrdRunPreservesSessionRuntimeDir(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", "/tmp/session-runtime")
+	previousConfig := config
+	previousPaths := testS6PathsOverride
+	previousAvailable := s6AvailableFunc
+	t.Cleanup(func() {
+		config = previousConfig
+		testS6PathsOverride = previousPaths
+		s6AvailableFunc = previousAvailable
+	})
+	config = buildConfig(true)
+	testS6PathsOverride = &s6PlanePaths{
+		SourceRoot:      filepath.Join(tmp, "s6", "rc"),
+		CompiledDir:     filepath.Join(tmp, "run", "s6", "compiled.servicectl"),
+		LiveDir:         filepath.Join(tmp, "run", "s6", "state"),
+		BundleDir:       filepath.Join(tmp, "s6", "rc", s6BundleName()),
+		BundleContents:  filepath.Join(tmp, "s6", "rc", s6BundleName(), "contents"),
+		DefaultContents: filepath.Join(tmp, "s6", "rc", "default", "contents"),
+	}
+	s6AvailableFunc = func() bool { return true }
+	unitDir := filepath.Join(tmp, "units")
+	if err := os.MkdirAll(unitDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	config.SystemdPaths = []string{unitDir}
+	if err := os.WriteFile(filepath.Join(unitDir, "demo.service"), []byte("[Service]\nType=simple\nExecStart=/bin/sleep 30\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := enableWithS6("demo.service"); err != nil {
+		t.Fatal(err)
+	}
+	run, err := os.ReadFile(filepath.Join(s6OrchestrdSourceDir("demo.service"), "run"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "/usr/bin/env XDG_RUNTIME_DIR=/tmp/session-runtime " + sysOrchestrdBinaryPath() + " --user --unit demo.service"
+	if !strings.Contains(string(run), want) {
+		t.Fatalf("run script = %q, want %q", run, want)
+	}
+	if _, err := os.Stat(filepath.Join(s6OrchestrdSourceDir("demo.service"), "notification-fd")); !os.IsNotExist(err) {
+		t.Fatalf("ordinary orchestrator must not use notification-fd: %v", err)
 	}
 }
 

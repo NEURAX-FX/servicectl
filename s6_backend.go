@@ -49,8 +49,24 @@ func sysPropertydBinaryPath() string {
 	return userBinaryPath("sys-propertyd")
 }
 
+func sysCgroupdBinaryPath() string {
+	return userBinaryPath("sys-cgroupd")
+}
+
 func sysOrchestrdBinaryPath() string {
 	return userBinaryPath("sys-orchestrd")
+}
+
+func s6OrchestrdRunPrefix() string {
+	runLine := sysOrchestrdBinaryPath()
+	if userMode() {
+		runLine = "/usr/bin/env XDG_RUNTIME_DIR=" + s6UserSessionRuntimeDir() + " " + runLine + " --user"
+	}
+	return runLine
+}
+
+func s6UserSessionRuntimeDir() string {
+	return runtimeDir()
 }
 
 func s6LiveEnabled() bool {
@@ -84,6 +100,10 @@ func s6SysPropertydServiceName() string {
 	return "sys-propertyd"
 }
 
+func s6SysCgroupdServiceName() string {
+	return "sys-cgroupd"
+}
+
 func s6SysvisiondSourceDir() string {
 	return filepath.Join(s6SourceRoot(), s6SysvisiondServiceName())
 }
@@ -94,6 +114,10 @@ func s6ServicectlAPISourceDir() string {
 
 func s6SysPropertydSourceDir() string {
 	return filepath.Join(s6SourceRoot(), s6SysPropertydServiceName())
+}
+
+func s6SysCgroupdSourceDir() string {
+	return filepath.Join(s6SourceRoot(), s6SysCgroupdServiceName())
 }
 
 func s6CompiledValidateDir() string {
@@ -169,6 +193,7 @@ func ensureS6Bundle() error {
 	entries = appendUniqueLinePreserveOrder(entries, s6SysvisiondServiceName())
 	if !userMode() {
 		entries = appendUniqueLinePreserveOrder(entries, s6SysPropertydServiceName())
+		entries = appendUniqueLinePreserveOrder(entries, s6SysCgroupdServiceName())
 	}
 	entries = appendUniqueLinePreserveOrder(entries, s6ServicectlAPIServiceName())
 	if err := writeLineFile(s6DefaultContentsPath(), entries); err != nil {
@@ -179,6 +204,9 @@ func ensureS6Bundle() error {
 	}
 	if !userMode() {
 		if err := ensureSysPropertydSource(); err != nil {
+			return err
+		}
+		if err := ensureSysCgroupdSource(); err != nil {
 			return err
 		}
 	}
@@ -220,8 +248,12 @@ func ensureSysvisiondSource() error {
 	if userMode() {
 		runLine = "/usr/bin/env XDG_RUNTIME_DIR=" + runtimeDir() + " " + sysvisiondBinaryPath() + " --mode=user"
 	}
+	runLine += " --ready-fd=3"
 	runScript := strings.Join([]string{"#!/usr/bin/execlineb -P", runLine, ""}, "\n")
 	if err := os.WriteFile(filepath.Join(serviceDir, "run"), []byte(runScript), 0755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(serviceDir, "notification-fd"), []byte("3\n"), 0644); err != nil {
 		return err
 	}
 	depsContent := s6ServicectlAPIServiceName() + "\n"
@@ -247,6 +279,43 @@ func ensureSysPropertydSource() error {
 	return os.WriteFile(filepath.Join(serviceDir, "dependencies"), nil, 0644)
 }
 
+func ensureSysCgroupdSource() error {
+	serviceDir := s6SysCgroupdSourceDir()
+	if err := os.MkdirAll(serviceDir, 0755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(serviceDir, "type"), []byte("longrun\n"), 0644); err != nil {
+		return err
+	}
+	runScript := strings.Join([]string{"#!/usr/bin/execlineb -P", sysCgroupdBinaryPath(), ""}, "\n")
+	if err := os.WriteFile(filepath.Join(serviceDir, "run"), []byte(runScript), 0755); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(serviceDir, "dependencies"), []byte(s6SysvisiondServiceName()+"\n"), 0644)
+}
+
+func ensureS6CoreServices() error {
+	if userMode() {
+		return fmt.Errorf("ensure-s6 is only available in system mode")
+	}
+	if err := ensureS6Bundle(); err != nil {
+		return err
+	}
+	if err := validateS6Sources(); err != nil {
+		return err
+	}
+	if _, err := os.Stat(s6LiveDir()); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if err := liveUpdateS6(); err != nil {
+		return err
+	}
+	return liveStartS6(s6SysCgroupdServiceName())
+}
+
 func enableWithS6(unitName string) error {
 	if !s6AvailableFunc() {
 		return fmt.Errorf("s6 backend is not available")
@@ -261,10 +330,7 @@ func enableWithS6(unitName string) error {
 	if err := os.WriteFile(filepath.Join(serviceDir, "type"), []byte("longrun\n"), 0644); err != nil {
 		return err
 	}
-	runLine := sysOrchestrdBinaryPath()
-	if userMode() {
-		runLine += " --user"
-	}
+	runLine := s6OrchestrdRunPrefix()
 	runLine += " --unit " + strings.TrimSuffix(resolveUnitAlias(unitName), ".service") + ".service"
 	runScript := strings.Join([]string{"#!/usr/bin/execlineb -P", runLine, ""}, "\n")
 	if err := os.WriteFile(filepath.Join(serviceDir, "run"), []byte(runScript), 0755); err != nil {

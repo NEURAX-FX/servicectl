@@ -124,7 +124,6 @@ Owns the project runtime:
 - `/usr/bin/sys-orchestrd`
 - `/usr/lib/servicectl/socket-holders.d/dbus.conf`
 - `/usr/lib/tmpfiles.d/servicectl.conf`
-- `/etc/dinit.d/sys-cgroupd`
 - `/var/lib/servicectl`
 - `/usr/share/licenses/servicectl/LICENSE`
 
