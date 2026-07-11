@@ -55,6 +55,7 @@ Low-level / internal:
   serve-api     Start the local servicectl query/event API socket
   activate-dbus Internal D-Bus activation entrypoint
   dbus-activation Configure the sys-dbusd activation frontend
+  cgroup        Inspect sys-cgroupd tracking and explicitly attach a PID
   version       Show the servicectl version
   help          Show this help
 
@@ -1506,7 +1507,7 @@ parsedFlags:
 			return
 		}
 	}
-	if groupFlag == "" && len(args) == 1 && args[0] != "list" && args[0] != "serve-api" && args[0] != "version" {
+	if groupFlag == "" && len(args) == 1 && args[0] != "list" && args[0] != "serve-api" && args[0] != "version" && args[0] != "cgroup" {
 		printHelp()
 		return
 	}
@@ -1540,6 +1541,9 @@ parsedFlags:
 	}
 	if action == "dbus-activation" {
 		os.Exit(dbusActivationCommand(targets))
+	}
+	if action == "cgroup" {
+		os.Exit(cgroupCommand(targets))
 	}
 	if action == "group-start-order" {
 		if len(targets) != 1 {
