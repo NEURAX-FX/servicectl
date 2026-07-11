@@ -293,6 +293,8 @@ func (f *LinuxCgroupFS) Path(key UnitKey) string {
 	return filepath.Join(append([]string{f.root}, components...)...)
 }
 
+func (f *LinuxCgroupFS) Root() string { return f.root }
+
 func groupComponents(key UnitKey) ([]string, error) {
 	encoded, err := key.EncodedUnit()
 	if err != nil {
