@@ -161,12 +161,25 @@ func (m Migrator) moveAndVerify(ctx context.Context, key UnitKey, before Process
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	current, err := m.Proc.Inspect(before.PID)
+	if err != nil {
+		return err
+	}
+	if current.PIDFD >= 0 {
+		defer unix.Close(current.PIDFD)
+	}
+	if current.StartTime != before.StartTime || current.UID != before.UID {
+		return fmt.Errorf("%w for PID %d", ErrProcessIdentityChanged, before.PID)
+	}
 	if err := m.Groups.MovePID(key, before.PID); err != nil {
 		return err
 	}
-	after, err := m.inspectStable(before.PID)
+	after, err := m.Proc.Inspect(before.PID)
 	if err != nil {
 		return err
+	}
+	if after.PIDFD >= 0 {
+		defer unix.Close(after.PIDFD)
 	}
 	if after.StartTime != before.StartTime || after.UID != before.UID {
 		return fmt.Errorf("%w for PID %d", ErrProcessIdentityChanged, before.PID)

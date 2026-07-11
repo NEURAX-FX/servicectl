@@ -217,6 +217,58 @@ func TestSchedulerLoadsRegistryHints(t *testing.T) {
 	}
 }
 
+func TestRegistryHintReschedulesOnFirstReadySnapshot(t *testing.T) {
+	clock := &manualClock{}
+	proc := newSchedulerProc(cgrouptrack.Process{PID: 10, UID: 0, StartTime: 100, State: 'S'})
+	groups := newSchedulerGroups()
+	source := &fakeVisionSource{units: map[string]visionapi.UnitSnapshot{}}
+	snapshot := readySnapshot("demo.service", visionapi.ModeSystem, 0, 10, 100, "epoch-a", 1)
+	source.units[snapshot.Name] = snapshot
+	s := newScheduler(schedulerOptions{
+		bootID: "boot-a", settleDelay: 100 * time.Millisecond, afterFunc: clock.AfterFunc,
+		proc: proc, groups: groups,
+		migrator: cgrouptrack.Migrator{Proc: proc, Groups: groups, MaxRounds: 2, Deadline: time.Second},
+	})
+	s.LoadRegistry(cgrouptrack.Registry{Version: 1, Units: []cgrouptrack.UnitRecord{{
+		Identity: cgrouptrack.InstanceIdentity{
+			UnitKey: cgrouptrack.UnitKey{Mode: cgrouptrack.ModeSystem, Unit: "demo.service"},
+			BootID:  "boot-a", MainPID: 10, MainPIDStartTime: 100, VisionEpoch: "epoch-a", Generation: 1,
+		},
+		State: cgrouptrack.StateTracked,
+	}}})
+	s.Ready(source, snapshot)
+	clock.Advance(100 * time.Millisecond)
+	if !reflect.DeepEqual(groups.moves, []int{10}) {
+		t.Fatalf("registry hint did not rebuild kernel membership: %#v", groups.moves)
+	}
+}
+
+func TestReconcileReschedulesKnownTrackedUnitWithMissingGroup(t *testing.T) {
+	clock := &manualClock{}
+	proc := newSchedulerProc(cgrouptrack.Process{PID: 10, UID: 0, StartTime: 100, State: 'S'})
+	groups := newSchedulerGroups()
+	source := &fakeVisionSource{units: map[string]visionapi.UnitSnapshot{}}
+	snapshot := readySnapshot("demo.service", visionapi.ModeSystem, 0, 10, 100, "epoch-a", 1)
+	source.units[snapshot.Name] = snapshot
+	s := newScheduler(schedulerOptions{
+		bootID: "boot-a", settleDelay: 100 * time.Millisecond, afterFunc: clock.AfterFunc,
+		proc: proc, groups: groups,
+		migrator: cgrouptrack.Migrator{Proc: proc, Groups: groups, MaxRounds: 2, Deadline: time.Second},
+	})
+	identity, err := s.identityFromSnapshot(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.units[identity.UnitKey] = &unitWork{identity: identity, state: cgrouptrack.StateTracked, source: source}
+	if err := s.ReconcileGroups(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(100 * time.Millisecond)
+	if !reflect.DeepEqual(groups.moves, []int{10}) {
+		t.Fatalf("missing group did not trigger migration: %#v", groups.moves)
+	}
+}
+
 func readySnapshot(unit, mode string, uid uint32, pid int, start uint64, epoch string, generation uint64) visionapi.UnitSnapshot {
 	return visionapi.UnitSnapshot{
 		Name: unit, Mode: mode, UID: uid, State: "STARTED", Lifecycle: visionapi.LifecycleReady,

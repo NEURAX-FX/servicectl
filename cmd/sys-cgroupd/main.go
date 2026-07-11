@@ -223,8 +223,9 @@ func (s *scheduler) Ready(source VisionSource, snapshot visionapi.UnitSnapshot) 
 	s.mu.Lock()
 	if previous := s.units[identity.UnitKey]; previous != nil {
 		if previous.identity == identity {
+			hadSource := previous.source != nil
 			previous.source = source
-			if previous.state != cgrouptrack.StateEventSourceOffline && previous.state != cgrouptrack.StateDegraded && previous.state != cgrouptrack.StatePartial {
+			if hadSource && previous.state != cgrouptrack.StateEventSourceOffline && previous.state != cgrouptrack.StateDegraded && previous.state != cgrouptrack.StatePartial {
 				s.mu.Unlock()
 				return
 			}
@@ -375,7 +376,9 @@ func (s *scheduler) ReconcileGroups(context.Context) error {
 	if err != nil {
 		return err
 	}
+	observed := make(map[cgrouptrack.UnitKey]bool, len(groups))
 	for _, group := range groups {
+		observed[group.Key] = true
 		s.mu.Lock()
 		work := s.units[group.Key]
 		s.mu.Unlock()
@@ -396,6 +399,17 @@ func (s *scheduler) ReconcileGroups(context.Context) error {
 		}
 	}
 	s.mu.Lock()
+	for key, work := range s.units {
+		if observed[key] || work.source == nil || work.identity.Validate() != nil || work.state != cgrouptrack.StateTracked {
+			continue
+		}
+		if work.timer != nil {
+			work.timer.Stop()
+		}
+		identity := work.identity
+		work.state = cgrouptrack.StatePending
+		work.timer = s.afterFunc(s.settleDelay, func() { s.migrateCurrent(identity) })
+	}
 	s.lastReconcile = time.Now().UTC()
 	s.mu.Unlock()
 	return nil
@@ -897,7 +911,7 @@ func main() {
 	server := cgrouptrack.NewServer(cgrouptrack.ServerOptions{Path: cfg.socketPath, Mode: 0o666, Service: scheduler, Proc: proc, ManagedCgroupPath: cfg.cgroupRoot})
 	errCh := make(chan error, 1)
 	go func() { errCh <- server.Serve(ctx) }()
-	systemSource := &unixVisionSource{path: visionapi.SystemSysvisionSocketPath(), trustedMode: visionapi.ModeSystem}
+	systemSource := &unixVisionSource{path: visionapi.SysvisionSocketPathForMode(visionapi.ModeSystem), trustedMode: visionapi.ModeSystem}
 	go runSource(ctx, scheduler, systemSource, logger)
 	startedUsers := make(map[uint32]context.CancelFunc)
 	reconcile := time.NewTicker(cfg.reconcileInterval)
