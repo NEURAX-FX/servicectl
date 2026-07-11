@@ -52,6 +52,7 @@ type ProcFS interface {
 	ListPIDs() ([]int, error)
 	OpenPIDFD(pid int) (int, error)
 	PIDNamespace(pid int) (FileIdentity, error)
+	SelfPIDNamespace() (FileIdentity, error)
 	Inspect(pid int) (Process, error)
 }
 
@@ -144,7 +145,15 @@ func (p *LinuxProcFS) OpenPIDFD(pid int) (int, error) {
 }
 
 func (p *LinuxProcFS) PIDNamespace(pid int) (FileIdentity, error) {
-	info, err := os.Stat(filepath.Join(p.root, integerString(pid), "ns", "pid"))
+	return p.pidNamespacePath(filepath.Join(p.root, integerString(pid), "ns", "pid"))
+}
+
+func (p *LinuxProcFS) SelfPIDNamespace() (FileIdentity, error) {
+	return p.pidNamespacePath(filepath.Join(p.root, "self", "ns", "pid"))
+}
+
+func (p *LinuxProcFS) pidNamespacePath(path string) (FileIdentity, error) {
+	info, err := os.Stat(path)
 	if err != nil {
 		return FileIdentity{}, err
 	}

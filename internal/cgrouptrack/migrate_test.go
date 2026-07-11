@@ -135,6 +135,7 @@ func (p *fakeMigrationProc) ReadCgroup(pid int) (string, error)         { panic(
 func (p *fakeMigrationProc) ReadExecutable(pid int) (string, error)     { panic("not used") }
 func (p *fakeMigrationProc) OpenPIDFD(pid int) (int, error)             { panic("not used") }
 func (p *fakeMigrationProc) PIDNamespace(pid int) (FileIdentity, error) { panic("not used") }
+func (p *fakeMigrationProc) SelfPIDNamespace() (FileIdentity, error)    { panic("not used") }
 
 type recordingGroups struct {
 	moves       []int
