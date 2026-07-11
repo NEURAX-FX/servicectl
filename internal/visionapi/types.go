@@ -24,10 +24,16 @@ const (
 	SourceSysPropertyd         = "sys-propertyd"
 	KindUnitCommand            = "unit.command"
 	KindUnitRuntime            = "unit.runtime"
+	KindUnitReady              = "unit.ready"
+	KindUnitMainPIDChanged     = "unit.main-pid-changed"
+	KindUnitStopped            = "unit.stopped"
 	KindUnitOrchestration      = "unit.orchestration"
 	KindUnitQuery              = "unit.query"
 	KindPropertyChanged        = "property.changed"
 	KindGroupChanged           = "group.changed"
+	LifecycleUnknown           = "unknown"
+	LifecycleReady             = "ready"
+	LifecycleStopped           = "stopped"
 )
 
 type Plane struct {
@@ -80,6 +86,10 @@ func RuntimeDir(userMode bool, xdgRuntimeDir string) string {
 		return filepath.Join("/run/user", strconv.Itoa(os.Getuid()), "servicectl")
 	}
 	return SystemRuntimeDir
+}
+
+func RuntimeDirForUID(uid uint32) string {
+	return filepath.Join("/run/user", strconv.FormatUint(uint64(uid), 10), "servicectl")
 }
 
 func ServicectlSocketPath(userMode bool, xdgRuntimeDir string) string {
@@ -138,6 +148,10 @@ func SysvisionSocketPathForMode(mode string) string {
 	return filepath.Join(SysvisionDirForMode(mode), SystemSysvisionSockName)
 }
 
+func SysvisionSocketPathForUID(uid uint32) string {
+	return filepath.Join(RuntimeDirForUID(uid), SysvisionDirName, SystemSysvisionSockName)
+}
+
 func SystemSysvisionIngressSocketPath() string {
 	return filepath.Join(SystemSysvisionDir(), SysvisionIngressSockName)
 }
@@ -155,27 +169,42 @@ func SystemNotifydIngressSocketPath() string {
 }
 
 type UnitSnapshot struct {
-	Name         string `json:"name"`
-	Description  string `json:"description"`
-	Mode         string `json:"mode"`
-	SourcePath   string `json:"source_path"`
-	ManagedBy    string `json:"managed_by"`
-	DinitName    string `json:"dinit_name"`
-	LoggerName   string `json:"logger_name"`
-	State        string `json:"state"`
-	Activation   string `json:"activation"`
-	ProcessID    string `json:"process_id"`
-	ManagerPID   string `json:"manager_pid"`
-	MainPID      string `json:"main_pid"`
-	Phase        string `json:"phase"`
-	ChildState   string `json:"child_state"`
-	Status       string `json:"status"`
-	Failure      string `json:"failure"`
-	NotifySocket string `json:"notify_socket"`
-	BusName      string `json:"bus_name"`
-	BusOwner     string `json:"bus_owner"`
-	StateFile    string `json:"state_file"`
-	UpdatedAt    string `json:"updated_at"`
+	Name             string `json:"name"`
+	Description      string `json:"description"`
+	Mode             string `json:"mode"`
+	SourcePath       string `json:"source_path"`
+	ManagedBy        string `json:"managed_by"`
+	DinitName        string `json:"dinit_name"`
+	LoggerName       string `json:"logger_name"`
+	State            string `json:"state"`
+	Activation       string `json:"activation"`
+	ProcessID        string `json:"process_id"`
+	ManagerPID       string `json:"manager_pid"`
+	MainPID          string `json:"main_pid"`
+	Phase            string `json:"phase"`
+	ChildState       string `json:"child_state"`
+	Status           string `json:"status"`
+	Failure          string `json:"failure"`
+	NotifySocket     string `json:"notify_socket"`
+	BusName          string `json:"bus_name"`
+	BusOwner         string `json:"bus_owner"`
+	StateFile        string `json:"state_file"`
+	UpdatedAt        string `json:"updated_at"`
+	UID              uint32 `json:"uid"`
+	MainPIDStartTime uint64 `json:"main_pid_starttime"`
+	VisionEpoch      string `json:"vision_epoch"`
+	Generation       uint64 `json:"generation"`
+	Lifecycle        string `json:"lifecycle"`
+}
+
+type MetaResponse struct {
+	VisionEpoch               string `json:"vision_epoch"`
+	Mode                      string `json:"mode"`
+	UID                       uint32 `json:"uid"`
+	ServicectlEventsConnected bool   `json:"servicectl_events_connected"`
+	ServicectlEventsError     string `json:"servicectl_events_error,omitempty"`
+	SnapshotReady             bool   `json:"snapshot_ready"`
+	SnapshotError             string `json:"snapshot_error,omitempty"`
 }
 
 type PropertyState struct {
@@ -215,13 +244,16 @@ type UnitsResponse struct {
 }
 
 type EventEnvelope struct {
-	Source    string            `json:"source"`
-	Kind      string            `json:"kind"`
-	Mode      string            `json:"mode"`
-	Unit      string            `json:"unit"`
-	Target    string            `json:"target,omitempty"`
-	Timestamp string            `json:"timestamp"`
-	Payload   map[string]string `json:"payload,omitempty"`
+	Source      string            `json:"source"`
+	Kind        string            `json:"kind"`
+	Mode        string            `json:"mode"`
+	Unit        string            `json:"unit"`
+	Target      string            `json:"target,omitempty"`
+	Timestamp   string            `json:"timestamp"`
+	Payload     map[string]string `json:"payload,omitempty"`
+	UID         uint32            `json:"uid"`
+	VisionEpoch string            `json:"vision_epoch,omitempty"`
+	Generation  uint64            `json:"generation,omitempty"`
 }
 
 type WatchFilter struct {
@@ -231,6 +263,7 @@ type WatchFilter struct {
 	Unit   string
 	Group  string
 	Key    string
+	UID    *uint32
 }
 
 func (f WatchFilter) Matches(event EventEnvelope) bool {
@@ -241,6 +274,9 @@ func (f WatchFilter) Matches(event EventEnvelope) bool {
 		return false
 	}
 	if f.Mode != "" && !strings.EqualFold(strings.TrimSpace(f.Mode), strings.TrimSpace(event.Mode)) {
+		return false
+	}
+	if f.UID != nil && *f.UID != event.UID {
 		return false
 	}
 	if f.Group != "" && strings.TrimSpace(f.Group) != strings.TrimSpace(event.Payload["group"]) {
