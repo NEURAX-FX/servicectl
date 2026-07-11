@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"servicectl/internal/visionapi"
 )
 
 func TestS6PathsAreUnifiedAcrossModes(t *testing.T) {
@@ -260,12 +262,12 @@ func TestBuildEnabledServiceDAGSkipsMissingExplicitRoot(t *testing.T) {
 }
 
 func TestUserActivationGateReady(t *testing.T) {
-	metaReady := sysvisionMetaResponse{SystemServicectlEventsConnected: true}
+	metaReady := sysvisionMetaResponse{MetaResponse: visionapi.MetaResponse{ServicectlEventsConnected: true}}
 	if !userActivationGateReady(true, metaReady, false, false) {
 		t.Fatal("expected gate to be ready when sysvision meta says system bus connected")
 	}
 
-	metaNotReady := sysvisionMetaResponse{SystemServicectlEventsConnected: false}
+	metaNotReady := sysvisionMetaResponse{MetaResponse: visionapi.MetaResponse{ServicectlEventsConnected: false}}
 	if userActivationGateReady(true, metaNotReady, true, true) {
 		t.Fatal("expected gate to be blocked when sysvision meta says system bus disconnected")
 	}
@@ -276,5 +278,44 @@ func TestUserActivationGateReady(t *testing.T) {
 
 	if userActivationGateReady(false, sysvisionMetaResponse{}, true, false) {
 		t.Fatal("expected fallback socket check to block activation when socket missing")
+	}
+}
+
+func TestEnsureS6BundleUsesOnePlaneInUserMode(t *testing.T) {
+	tmp := t.TempDir()
+	previousConfig := config
+	previousPaths := testS6PathsOverride
+	t.Cleanup(func() {
+		config = previousConfig
+		testS6PathsOverride = previousPaths
+	})
+	config = buildConfig(true)
+	testS6PathsOverride = &s6PlanePaths{
+		SourceRoot:      filepath.Join(tmp, "s6", "rc"),
+		CompiledDir:     filepath.Join(tmp, "run", "s6", "compiled.servicectl"),
+		LiveDir:         filepath.Join(tmp, "run", "s6", "state"),
+		BundleDir:       filepath.Join(tmp, "s6", "rc", s6BundleName()),
+		BundleContents:  filepath.Join(tmp, "s6", "rc", s6BundleName(), "contents"),
+		DefaultContents: filepath.Join(tmp, "s6", "rc", "default", "contents"),
+	}
+	if err := ensureS6Bundle(); err != nil {
+		t.Fatal(err)
+	}
+	apiRun, err := os.ReadFile(filepath.Join(s6ServicectlAPISourceDir(), "run"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	visionRun, err := os.ReadFile(filepath.Join(s6SysvisiondSourceDir(), "run"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(apiRun), "servicectl --user serve-api") {
+		t.Fatalf("API run script = %q", apiRun)
+	}
+	if !strings.Contains(string(visionRun), "sysvisiond --mode=user") {
+		t.Fatalf("sysvisiond run script = %q", visionRun)
+	}
+	if _, err := os.Stat(s6SysPropertydSourceDir()); !os.IsNotExist(err) {
+		t.Fatalf("user mode created sys-propertyd source: %v", err)
 	}
 }

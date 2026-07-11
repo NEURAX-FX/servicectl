@@ -161,7 +161,9 @@ func ensureS6Bundle() error {
 	entries := uniqueLinesPreserveOrder(string(defaultContents))
 	entries = appendUniqueLinePreserveOrder(entries, s6BundleName())
 	entries = appendUniqueLinePreserveOrder(entries, s6SysvisiondServiceName())
-	entries = appendUniqueLinePreserveOrder(entries, s6SysPropertydServiceName())
+	if !userMode() {
+		entries = appendUniqueLinePreserveOrder(entries, s6SysPropertydServiceName())
+	}
 	entries = appendUniqueLinePreserveOrder(entries, s6ServicectlAPIServiceName())
 	if err := writeLineFile(s6DefaultContentsPath(), entries); err != nil {
 		return err
@@ -169,8 +171,10 @@ func ensureS6Bundle() error {
 	if err := ensureServicectlAPISource(); err != nil {
 		return err
 	}
-	if err := ensureSysPropertydSource(); err != nil {
-		return err
+	if !userMode() {
+		if err := ensureSysPropertydSource(); err != nil {
+			return err
+		}
 	}
 	if err := ensureSysvisiondSource(); err != nil {
 		return err
@@ -187,6 +191,9 @@ func ensureServicectlAPISource() error {
 		return err
 	}
 	runLine := servicectlBinaryPath()
+	if userMode() {
+		runLine += " --user"
+	}
 	runLine += " serve-api"
 	runScript := strings.Join([]string{"#!/usr/bin/execlineb -P", runLine, ""}, "\n")
 	if err := os.WriteFile(filepath.Join(serviceDir, "run"), []byte(runScript), 0755); err != nil {
@@ -203,12 +210,18 @@ func ensureSysvisiondSource() error {
 	if err := os.WriteFile(filepath.Join(serviceDir, "type"), []byte("longrun\n"), 0644); err != nil {
 		return err
 	}
-	runLine := sysvisiondBinaryPath()
+	runLine := sysvisiondBinaryPath() + " --mode=system"
+	if userMode() {
+		runLine = sysvisiondBinaryPath() + " --mode=user"
+	}
 	runScript := strings.Join([]string{"#!/usr/bin/execlineb -P", runLine, ""}, "\n")
 	if err := os.WriteFile(filepath.Join(serviceDir, "run"), []byte(runScript), 0755); err != nil {
 		return err
 	}
-	depsContent := s6ServicectlAPIServiceName() + "\n" + s6SysPropertydServiceName() + "\n"
+	depsContent := s6ServicectlAPIServiceName() + "\n"
+	if !userMode() {
+		depsContent += s6SysPropertydServiceName() + "\n"
+	}
 	return os.WriteFile(filepath.Join(serviceDir, "dependencies"), []byte(depsContent), 0644)
 }
 
@@ -271,8 +284,10 @@ func enableWithS6(unitName string) error {
 		if err := liveStartS6(s6ServicectlAPIServiceName()); err != nil {
 			return err
 		}
-		if err := liveStartS6(s6SysPropertydServiceName()); err != nil {
-			return err
+		if !userMode() {
+			if err := liveStartS6(s6SysPropertydServiceName()); err != nil {
+				return err
+			}
 		}
 		if err := liveStartS6(s6SysvisiondServiceName()); err != nil {
 			return err

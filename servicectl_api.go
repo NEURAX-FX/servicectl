@@ -343,22 +343,20 @@ func (s servicectlPlaneServer) serveAPI() error {
 	return nil
 }
 
+func selectedServicectlPlane(hub *servicectlEventHub) servicectlPlaneServer {
+	mode := visionapi.ModeSystem
+	if userMode() {
+		mode = visionapi.ModeUser
+	}
+	return newServicectlPlaneServer(mode, hub)
+}
+
 func servicectlAPIServer() int {
 	hub := newServicectlEventHub()
-	servers := []servicectlPlaneServer{
-		newServicectlPlaneServer(visionapi.ModeSystem, hub),
-		newServicectlPlaneServer(visionapi.ModeUser, hub),
-	}
-	errCh := make(chan error, len(servers)*2)
-	for _, server := range servers {
-		server := server
-		go func() {
-			errCh <- server.serveIngress()
-		}()
-		go func() {
-			errCh <- server.serveAPI()
-		}()
-	}
+	server := selectedServicectlPlane(hub)
+	errCh := make(chan error, 2)
+	go func() { errCh <- server.serveIngress() }()
+	go func() { errCh <- server.serveAPI() }()
 	err := <-errCh
 	if err != nil {
 		fmt.Println(oneLineError("servicectl api server failed", err))

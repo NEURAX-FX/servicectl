@@ -1264,7 +1264,7 @@ func ensureUserModeReady() error {
 
 func userActivationGateReady(metaOK bool, meta sysvisionMetaResponse, systemSockExists bool, eventsSockExists bool) bool {
 	if metaOK {
-		return meta.SystemServicectlEventsConnected
+		return meta.ServicectlEventsConnected
 	}
 	return systemSockExists && eventsSockExists
 }
@@ -1273,7 +1273,7 @@ func ensureSystemPlaneReadyForUserActivation() error {
 	if !userMode() {
 		return nil
 	}
-	meta, ok := queryBusMetaViaSysvision()
+	meta, ok := queryBusMetaViaSysvisionMode(visionapi.ModeSystem)
 	systemSock := visionapi.SystemServicectlSocketPath()
 	eventsSock := visionapi.SystemServicectlEventsSocketPath()
 	systemSockExists := pathExists(systemSock)
@@ -1281,8 +1281,8 @@ func ensureSystemPlaneReadyForUserActivation() error {
 	if userActivationGateReady(ok, meta, systemSockExists, eventsSockExists) {
 		return nil
 	}
-	if ok && strings.TrimSpace(meta.SystemServicectlEventsError) != "" {
-		return fmt.Errorf("system plane is not ready for user activation: %s", strings.TrimSpace(meta.SystemServicectlEventsError))
+	if ok && strings.TrimSpace(meta.ServicectlEventsError) != "" {
+		return fmt.Errorf("system plane is not ready for user activation: %s", strings.TrimSpace(meta.ServicectlEventsError))
 	}
 	return fmt.Errorf("system plane is not ready for user activation: missing %s or %s", systemSock, eventsSock)
 }
