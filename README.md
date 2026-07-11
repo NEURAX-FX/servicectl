@@ -15,6 +15,7 @@
 - `sys-propertyd`: property/group state source for virtual targets and persisted enablement
 - `servicectl serve-api`: local unit snapshot and event API
 - `sysvisiond`: watch/query bus and event broker
+- `sys-cgroupd`: cgroup v2 process-membership tracker for ready services
 - `sys-orchestrd`: local orchestrator managed by s6 for units and groups
 - `s6`: top-level orchestration presence and dependency layer
 
@@ -22,14 +23,16 @@
 
 Runtime control flow:
 
-`s6 -> servicectl-api/sys-propertyd -> sysvisiond -> sys-orchestrd -> servicectl -> dinit/sys-notifyd -> real service`
+`s6 -> servicectl-api/sys-propertyd -> sysvisiond -> sys-orchestrd/sys-cgroupd -> servicectl -> dinit/sys-notifyd -> real service`
 
 Key rules:
 
 - `servicectl` remains the only CLI/control surface
 - `dinit` remains the final real service supervisor
 - `sys-propertyd` is the truth source for persisted group/property state
-- `sysvisiond` is bus-only: watch/query/broadcast, no persisted state and no decisions
+- each `sysvisiond` process serves one system or user event plane and normalizes ready/stopped/MainPID lifecycle state
+- `sys-cgroupd` consumes normalized lifecycle state and asynchronously assigns process trees to cgroup v2 leaves
+- cgroup tracking never configures CPU, memory, IO, pids, cpuset, freeze, kill, or service lifecycle policy
 - `sys-orchestrd` is the local state machine for enabled units/groups and calls `servicectl`
 - `s6` supervises orchestrators and static startup dependencies
 
@@ -97,6 +100,7 @@ Group=audio
 - `main.go` and top-level `*.go`: core `servicectl` CLI and shared logic
 - `cmd/`: standalone helper daemons and test binaries
 - `internal/visionapi/`: shared runtime path and event/query types
+- `internal/cgrouptrack/`: cgroup v2 membership, process identity, protocol, and recovery logic
 - `scripts/`: install and regression test scripts
 
 ## Packaging
@@ -118,6 +122,39 @@ Install all main binaries:
 ```bash
 bash ./scripts/install.sh
 ```
+
+## cgroup v2 Tracking
+
+`sys-cgroupd` tracks every ready servicectl-managed system or user service in a
+dedicated cgroup v2 leaf. Migration starts after a global 100 ms settle delay.
+The service remains running if tracking is unavailable or incomplete; status
+shows the degraded or partial state and reconciliation retries later.
+
+The daemon moves the service MainPID first, then its currently visible
+descendants. Processes that detached before discovery are never guessed. An
+operator can explicitly attach one additional PID:
+
+```bash
+servicectl cgroup status
+servicectl cgroup list
+servicectl cgroup inspect demo.service
+servicectl cgroup pids demo.service
+servicectl cgroup attach demo.service 1234
+
+servicectl --user cgroup list
+servicectl --user cgroup attach demo.service 5678
+```
+
+User requests are authenticated through the Unix socket peer UID and can only
+query or modify that user's plane. There is no detach operation. Reassignment
+between services owned by the same user is allowed; moving a PID out of the
+system plane or another user's subtree is rejected.
+
+The default managed root is `/sys/fs/cgroup/servicectl.slice`. On hosts where
+an outer manager owns that location, start `sys-cgroupd` with an existing
+writable delegated root using `--cgroup-root`. The daemon does not mount
+cgroup2, enable controllers, freeze processes, send signals, or write
+`cgroup.kill`.
 
 ## Test
 
@@ -141,7 +178,18 @@ bash ./scripts/test-sysvisiond-bus.sh
 bash ./scripts/test-sys-orchestrd.sh
 bash ./scripts/test-group-orchestration.sh
 bash ./scripts/test-s6-orchestrd.sh
+bash ./scripts/test-cgroupd-integration.sh --self-test
 ```
+
+Real cgroup migration tests are opt-in and require an explicitly delegated,
+writable cgroup v2 subtree:
+
+```bash
+sudo bash ./scripts/test-cgroupd-integration.sh --cgroup-root /sys/fs/cgroup/servicectl-test
+```
+
+The script never auto-selects the host cgroup root and cleans up only fixture
+processes it created with ordinary signals.
 
 `scripts/test-s6-live.sh` is for manual live s6 validation and is intentionally not part of `test-all.sh`.
 
@@ -152,6 +200,7 @@ bash ./scripts/test-s6-orchestrd.sh
 System mode:
 
 - `/run/servicectl`
+- `/run/servicectl/sys-cgroupd`
 - `/s6/rc`
 
 User mode:

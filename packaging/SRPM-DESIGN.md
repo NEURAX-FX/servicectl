@@ -117,12 +117,14 @@ Owns the project runtime:
 
 - `/usr/bin/servicectl`
 - `/usr/bin/sys-notifyd`
+- `/usr/bin/sys-cgroupd`
 - `/usr/bin/sys-logd`
 - `/usr/bin/sys-propertyd`
 - `/usr/bin/sysvisiond`
 - `/usr/bin/sys-orchestrd`
 - `/usr/lib/servicectl/socket-holders.d/dbus.conf`
 - `/usr/lib/tmpfiles.d/servicectl.conf`
+- `/etc/dinit.d/sys-cgroupd`
 - `/var/lib/servicectl`
 - `/usr/share/licenses/servicectl/LICENSE`
 
@@ -219,6 +221,7 @@ only the parent directory.
 d /run/servicectl 0755 root root -
 d /run/servicectl/managed 0755 root root -
 d /run/servicectl/sysvision 0755 root root -
+d /run/servicectl/sys-cgroupd 0700 root root -
 d /run/servicectl/logspill 0755 root root -
 d /run/dinit.d 0755 root root -
 d /run/dinit.d/generated 0755 root root -
@@ -232,6 +235,11 @@ tree.
 Per-service state directories, notify sockets, D-Bus trigger sockets, API
 sockets, generated Dinit services, and compiled s6 databases are created and
 removed by servicectl at runtime.
+
+The `sys-cgroupd` tmpfiles entry creates only a root-owned runtime directory.
+It does not create `/sys/fs/cgroup/servicectl.slice`, migrate a process, enable
+a cgroup controller, or start the daemon. The packaged Dinit definition is
+available for explicit operator startup and has no RPM scriptlet activation.
 
 ### Mutable D-Bus activation files
 
@@ -399,7 +407,7 @@ Scriptlets are intentionally minimal:
 
 - `%post` runs `systemd-tmpfiles --create servicectl.conf` when available.
 - No scriptlet starts, stops, enables, or reloads dinit, s6, servicectl, D-Bus,
-  or systemd services.
+  `sys-cgroupd`, or systemd services.
 - No scriptlet modifies PID 1, kernel command lines, initramfs, alternatives,
   or `/sbin/init`.
 - Uninstall removes only RPM-owned files. Runtime state in `/var/lib` follows
@@ -419,7 +427,9 @@ Safe buildroot checks are:
 - run upstream Skarnet build checks when provided and non-privileged;
 - run `make check` for Dinit;
 - run `go test -count=1 ./...` for servicectl;
-- assert all six production Go binaries exist;
+- run the unprivileged `sys-cgroupd` integration-script self-test without
+  touching host cgroupfs;
+- assert all eight production Go binaries exist;
 - run `dinit-check` against generated fixture services;
 - compile a minimal s6-rc fixture with the just-built `s6-rc-compile`;
 - inspect ELF dynamic dependencies and reject references to buildroot paths;
@@ -429,6 +439,11 @@ Safe buildroot checks are:
 Host integration scripts under `scripts/test-*.sh` are not run in `%check`
 because they start and stop real host services and write host runtime state.
 They remain a separate post-build test stage in a disposable VM.
+
+`scripts/test-cgroupd-integration.sh --self-test` is the exception: it validates
+only script syntax, dependencies, and the explicit delegated-root contract. Its
+real mode requires `--cgroup-root PATH`, root privileges, and a writable cgroup
+v2 subtree; `%check` never invokes that mode.
 
 ### SRPM acceptance test
 

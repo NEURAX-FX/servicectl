@@ -23,6 +23,7 @@ run_step() {
 
 run_step "Go build" go build ./...
 run_step "Go test" go test ./...
+run_step "sys-cgroupd integration self-test" bash "$ROOT/scripts/test-cgroupd-integration.sh" --self-test
 warn_host_integration
 run_step "sys-notifyd integration" bash "$ROOT/scripts/test-sys-notifyd.sh"
 run_step "System/User environment" bash "$ROOT/scripts/test-system-user-env.sh"

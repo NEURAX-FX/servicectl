@@ -316,6 +316,7 @@ export GOTOOLCHAIN=local
 export CGO_ENABLED=0
 go test -count=1 ./...
 bash scripts/test-install-paths.sh
+bash scripts/test-cgroupd-integration.sh --self-test
 %make_build -C _deps/dinit-%{dinit_version} check
 
 rm -rf _check-dinit
