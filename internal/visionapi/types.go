@@ -22,6 +22,7 @@ const (
 	SourceSysNotifyd           = "sys-notifyd"
 	SourceSysOrchestrd         = "sys-orchestrd"
 	SourceSysPropertyd         = "sys-propertyd"
+	SourceSysvisiond           = "sysvisiond"
 	KindUnitCommand            = "unit.command"
 	KindUnitRuntime            = "unit.runtime"
 	KindUnitReady              = "unit.ready"

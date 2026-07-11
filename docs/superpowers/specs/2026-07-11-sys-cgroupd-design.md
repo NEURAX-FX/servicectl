@@ -69,7 +69,11 @@ startup gate.
 
 ## cgroup Hierarchy
 
-The default managed root is:
+The daemon first locates the cgroup v2 mount by parsing `/proc/self/mountinfo`
+for filesystem type `cgroup2`, then confirms that `/proc/self/cgroup` contains
+the unified `0::` entry. Legacy v1 controller entries such as `freezer`,
+`memory`, `cpuset`, `cpu`, or `blkio` are ignored. On a normal unified or hybrid
+host the default managed root is therefore:
 
 ```text
 /sys/fs/cgroup/servicectl.slice

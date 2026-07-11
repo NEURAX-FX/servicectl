@@ -14,10 +14,13 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"servicectl/internal/procinfo"
 	"servicectl/internal/util"
 	"servicectl/internal/visionapi"
 )
@@ -36,16 +39,35 @@ type config struct {
 type planeState struct {
 	servicectlConnected bool
 	servicectlErrorText string
+	snapshotReady       bool
+	snapshotErrorText   string
+}
+
+type lifecycleInstance struct {
+	lifecycle  string
+	mainPID    int
+	startTime  uint64
+	generation uint64
+}
+
+type normalizer struct {
+	epoch string
+	uid   uint32
+	units map[string]lifecycleInstance
 }
 
 type daemon struct {
-	logger *log.Logger
-	cfg    config
-	epoch  string
-	mu     sync.Mutex
-	nextID int
-	subs   map[int]subscriber
-	plane  planeState
+	logger           *log.Logger
+	cfg              config
+	epoch            string
+	mu               sync.Mutex
+	nextID           int
+	subs             map[int]subscriber
+	plane            planeState
+	units            map[string]visionapi.UnitSnapshot
+	normalizer       *normalizer
+	refreshCh        chan struct{}
+	subscriberBuffer int
 }
 
 func main() {
@@ -107,7 +129,116 @@ func newDaemon(cfg config, epoch string, logger *log.Logger) *daemon {
 	if logger == nil {
 		logger = log.New(io.Discard, "", 0)
 	}
-	return &daemon{logger: logger, cfg: cfg, epoch: epoch, subs: make(map[int]subscriber)}
+	return &daemon{
+		logger:           logger,
+		cfg:              cfg,
+		epoch:            epoch,
+		subs:             make(map[int]subscriber),
+		units:            make(map[string]visionapi.UnitSnapshot),
+		normalizer:       newNormalizer(epoch, cfg.uid),
+		refreshCh:        make(chan struct{}, 1),
+		subscriberBuffer: 256,
+	}
+}
+
+func newNormalizer(epoch string, uid uint32) *normalizer {
+	return &normalizer{epoch: epoch, uid: uid, units: make(map[string]lifecycleInstance)}
+}
+
+func (n *normalizer) Update(input []visionapi.UnitSnapshot, startTimes map[int]uint64) ([]visionapi.UnitSnapshot, []visionapi.EventEnvelope) {
+	seen := make(map[string]struct{}, len(input))
+	snapshots := make([]visionapi.UnitSnapshot, 0, len(input))
+	events := make([]visionapi.EventEnvelope, 0)
+	for _, snapshot := range input {
+		name := strings.TrimSpace(snapshot.Name)
+		if name == "" {
+			continue
+		}
+		seen[name] = struct{}{}
+		pid, _ := strconv.Atoi(strings.TrimSpace(snapshot.MainPID))
+		startTime := startTimes[pid]
+		ready := lifecycleReady(snapshot, pid, startTime)
+		previous, exists := n.units[name]
+		next := previous
+		kind := ""
+		if ready {
+			next.lifecycle = visionapi.LifecycleReady
+			next.mainPID = pid
+			next.startTime = startTime
+			switch {
+			case !exists || previous.lifecycle != visionapi.LifecycleReady:
+				next.generation = previous.generation + 1
+				kind = visionapi.KindUnitReady
+			case previous.mainPID != pid || previous.startTime != startTime:
+				next.generation = previous.generation + 1
+				kind = visionapi.KindUnitMainPIDChanged
+			}
+		} else {
+			next.lifecycle = visionapi.LifecycleStopped
+			next.mainPID = 0
+			next.startTime = 0
+			if exists && previous.lifecycle == visionapi.LifecycleReady {
+				next.generation = previous.generation + 1
+				kind = visionapi.KindUnitStopped
+			}
+		}
+		n.units[name] = next
+		snapshot.UID = n.uid
+		snapshot.MainPIDStartTime = next.startTime
+		snapshot.VisionEpoch = n.epoch
+		snapshot.Generation = next.generation
+		snapshot.Lifecycle = next.lifecycle
+		snapshots = append(snapshots, snapshot)
+		if kind != "" {
+			events = append(events, lifecycleEvent(snapshot, kind))
+		}
+	}
+	for name, previous := range n.units {
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		if previous.lifecycle == visionapi.LifecycleReady {
+			previous.lifecycle = visionapi.LifecycleStopped
+			previous.mainPID = 0
+			previous.startTime = 0
+			previous.generation++
+			events = append(events, lifecycleEvent(visionapi.UnitSnapshot{
+				Name: name, UID: n.uid, VisionEpoch: n.epoch, Generation: previous.generation,
+			}, visionapi.KindUnitStopped))
+		}
+		n.units[name] = previous
+	}
+	sort.Slice(snapshots, func(i, j int) bool { return snapshots[i].Name < snapshots[j].Name })
+	sort.Slice(events, func(i, j int) bool { return events[i].Unit < events[j].Unit })
+	return snapshots, events
+}
+
+func lifecycleReady(snapshot visionapi.UnitSnapshot, pid int, startTime uint64) bool {
+	if pid <= 0 || startTime == 0 || !strings.EqualFold(strings.TrimSpace(snapshot.State), "STARTED") {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(snapshot.ManagedBy), "sys-notifyd") {
+		return strings.EqualFold(strings.TrimSpace(snapshot.Phase), "ready")
+	}
+	return true
+}
+
+func lifecycleEvent(snapshot visionapi.UnitSnapshot, kind string) visionapi.EventEnvelope {
+	return visionapi.EventEnvelope{
+		Source:      visionapi.SourceSysvisiond,
+		Kind:        kind,
+		Mode:        snapshot.Mode,
+		Unit:        snapshot.Name,
+		Timestamp:   time.Now().UTC().Format(time.RFC3339Nano),
+		UID:         snapshot.UID,
+		VisionEpoch: snapshot.VisionEpoch,
+		Generation:  snapshot.Generation,
+		Payload: map[string]string{
+			"main_pid":           snapshot.MainPID,
+			"main_pid_starttime": strconv.FormatUint(snapshot.MainPIDStartTime, 10),
+			"lifecycle":          snapshot.Lifecycle,
+		},
+	}
 }
 
 func (d *daemon) run() error {
@@ -116,6 +247,7 @@ func (d *daemon) run() error {
 	}
 	errCh := make(chan error, 2)
 	go d.bridgeServicectlEvents()
+	go d.pollSnapshots()
 	go func() { errCh <- d.listenNotifydIngress() }()
 	go func() { errCh <- d.serveAPI() }()
 	err := <-errCh
@@ -163,6 +295,7 @@ func (d *daemon) streamServicectlEvents() error {
 		}
 		event.UID = d.cfg.uid
 		d.broadcast(event)
+		d.requestRefresh()
 	}
 	if err := scanner.Err(); err != nil && err != io.EOF {
 		d.setServicectlEventsState(false, err.Error())
@@ -210,6 +343,7 @@ func (d *daemon) listenNotifydIngressOnce() error {
 		}
 		event.UID = d.cfg.uid
 		d.broadcast(event)
+		d.requestRefresh()
 	}
 }
 
@@ -299,14 +433,13 @@ func (d *daemon) handleUnitsQuery(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	resp, err := d.servicectlRequest(r.Context(), "/v1/units")
-	if err != nil {
-		w.WriteHeader(http.StatusBadGateway)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+	units, ready, errText := d.snapshot()
+	if !ready {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": errText})
 		return
 	}
-	defer resp.Body.Close()
-	copyResponse(w, resp)
+	util.WriteJSON(w, visionapi.UnitsResponse{Units: units, GeneratedAt: time.Now().UTC().Format(time.RFC3339Nano)})
 }
 
 func (d *daemon) handleUnitQuery(w http.ResponseWriter, r *http.Request) {
@@ -319,14 +452,17 @@ func (d *daemon) handleUnitQuery(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	resp, err := d.servicectlRequest(r.Context(), "/v1/unit/"+url.PathEscape(name))
-	if err != nil {
-		w.WriteHeader(http.StatusBadGateway)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+	unit, ready, errText, ok := d.unitSnapshot(name)
+	if !ready {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": errText})
 		return
 	}
-	defer resp.Body.Close()
-	copyResponse(w, resp)
+	if !ok {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	util.WriteJSON(w, unit)
 }
 
 func (d *daemon) handlePropertyQuery(w http.ResponseWriter, r *http.Request, path string) {
@@ -352,7 +488,11 @@ func (d *daemon) subscribe(filter visionapi.WatchFilter) (int, chan visionapi.Ev
 	// graph (e.g. slurmctld pulling in 20+ deps) without the broadcaster having
 	// to drop events on slow subscribers. The previous 32 overflowed and
 	// triggered the "dropping slow subscriber" log spam during normal boots.
-	ch := make(chan visionapi.EventEnvelope, 256)
+	buffer := d.subscriberBuffer
+	if buffer <= 0 {
+		buffer = 256
+	}
+	ch := make(chan visionapi.EventEnvelope, buffer)
 	d.subs[d.nextID] = subscriber{filter: filter, ch: ch}
 	return d.nextID, ch
 }
@@ -376,7 +516,9 @@ func (d *daemon) broadcast(event visionapi.EventEnvelope) {
 		select {
 		case sub.ch <- event:
 		default:
-			d.logger.Printf("dropping slow subscriber %d for %s %s %s", id, event.Mode, event.Source, event.Unit)
+			delete(d.subs, id)
+			close(sub.ch)
+			d.logger.Printf("closing slow subscriber %d for %s %s %s", id, event.Mode, event.Source, event.Unit)
 		}
 	}
 }
@@ -397,7 +539,97 @@ func (d *daemon) meta() visionapi.MetaResponse {
 		UID:                       d.cfg.uid,
 		ServicectlEventsConnected: d.plane.servicectlConnected,
 		ServicectlEventsError:     d.plane.servicectlErrorText,
+		SnapshotReady:             d.plane.snapshotReady,
+		SnapshotError:             d.plane.snapshotErrorText,
 	}
+}
+
+func (d *daemon) pollSnapshots() {
+	ticker := time.NewTicker(d.cfg.pollInterval)
+	defer ticker.Stop()
+	d.requestRefresh()
+	for {
+		select {
+		case <-ticker.C:
+			d.refreshSnapshots()
+		case <-d.refreshCh:
+			d.refreshSnapshots()
+		}
+	}
+}
+
+func (d *daemon) requestRefresh() {
+	select {
+	case d.refreshCh <- struct{}{}:
+	default:
+	}
+}
+
+func (d *daemon) refreshSnapshots() {
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	resp, err := d.servicectlRequest(ctx, "/v1/units")
+	if err != nil {
+		d.setSnapshotError(err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		d.setSnapshotError(fmt.Errorf("servicectl units returned %s", resp.Status))
+		return
+	}
+	var upstream visionapi.UnitsResponse
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&upstream); err != nil {
+		d.setSnapshotError(err)
+		return
+	}
+	startTimes := make(map[int]uint64)
+	for _, unit := range upstream.Units {
+		pid, _ := strconv.Atoi(strings.TrimSpace(unit.MainPID))
+		if pid <= 0 {
+			continue
+		}
+		stat, err := procinfo.ReadStat("/proc", pid)
+		if err == nil {
+			startTimes[pid] = stat.StartTime
+		}
+	}
+	snapshots, events := d.normalizer.Update(upstream.Units, startTimes)
+	d.mu.Lock()
+	d.units = make(map[string]visionapi.UnitSnapshot, len(snapshots))
+	for _, snapshot := range snapshots {
+		d.units[snapshot.Name] = snapshot
+	}
+	d.plane.snapshotReady = true
+	d.plane.snapshotErrorText = ""
+	d.mu.Unlock()
+	for _, event := range events {
+		d.broadcast(event)
+	}
+}
+
+func (d *daemon) setSnapshotError(err error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.plane.snapshotErrorText = err.Error()
+}
+
+func (d *daemon) snapshot() ([]visionapi.UnitSnapshot, bool, string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	units := make([]visionapi.UnitSnapshot, 0, len(d.units))
+	for _, unit := range d.units {
+		units = append(units, unit)
+	}
+	sort.Slice(units, func(i, j int) bool { return units[i].Name < units[j].Name })
+	return units, d.plane.snapshotReady, d.plane.snapshotErrorText
+}
+
+func (d *daemon) unitSnapshot(name string) (visionapi.UnitSnapshot, bool, string, bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	unit, ok := d.units[name]
+	return unit, d.plane.snapshotReady, d.plane.snapshotErrorText, ok
 }
 
 func (d *daemon) servicectlRequest(ctx context.Context, path string) (*http.Response, error) {

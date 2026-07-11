@@ -983,7 +983,7 @@ migration deadline: 10ms..30s
 max rounds: 1..64
 ```
 
-For the default path only, open and verify `/sys/fs/cgroup` as cgroup2 before creating `servicectl.slice`; a custom `--cgroup-root` must already exist. Then open the managed root, read boot ID, load/quarantine registry, start API mode 0666, connect the system source, discover user sources, and reconcile. Failure to open the root keeps the daemon API available in degraded state and retries with bounded backoff. `SIGHUP` triggers immediate reconciliation. `SIGTERM` stops sources, waits for active writes, saves registry, and exits without cleanup.
+For the default path only, parse `/proc/self/mountinfo` to locate the `cgroup2` mount and `/proc/self/cgroup` to require a `0::` unified entry. Ignore all nonzero v1 controller entries. Open and verify that mount before creating `servicectl.slice`; a custom `--cgroup-root` must already exist on cgroup2. Then open the managed root, read boot ID, load/quarantine registry, start API mode 0666, connect the system source, discover user sources, and reconcile. Failure to open the root keeps the daemon API available in degraded state and retries with bounded backoff. `SIGHUP` triggers immediate reconciliation. `SIGTERM` stops sources, waits for active writes, saves registry, and exits without cleanup.
 
 - [ ] **Step 6: Run daemon tests**
 
