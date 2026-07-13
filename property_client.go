@@ -246,20 +246,25 @@ func queryAllGroups() ([]visionapi.GroupState, error) {
 }
 
 func queryUnitGroups(name string) (visionapi.UnitGroupsResponse, bool) {
+	_ = propertyReload()
+	out, err := propertyUnitGroupsForMode(config.Mode, name)
+	return out, err == nil
+}
+
+func propertyUnitGroupsForMode(mode, name string) (visionapi.UnitGroupsResponse, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 	defer cancel()
-	_ = propertyReload()
-	resp, err := propertyRequest(ctx, http.MethodGet, "/v1/unit-groups/"+url.PathEscape(strings.TrimSpace(name))+"?mode="+url.QueryEscape(config.Mode), nil)
+	resp, err := propertyRequest(ctx, http.MethodGet, "/v1/unit-groups/"+url.PathEscape(strings.TrimSpace(name))+"?mode="+url.QueryEscape(mode), nil)
 	if err != nil {
-		return visionapi.UnitGroupsResponse{}, false
+		return visionapi.UnitGroupsResponse{}, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return visionapi.UnitGroupsResponse{}, false
+		return visionapi.UnitGroupsResponse{}, fmt.Errorf("unit group query returned %s", resp.Status)
 	}
 	var out visionapi.UnitGroupsResponse
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return visionapi.UnitGroupsResponse{}, false
+		return visionapi.UnitGroupsResponse{}, err
 	}
-	return out, true
+	return out, nil
 }

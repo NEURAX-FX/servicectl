@@ -228,12 +228,15 @@ func ensureServicectlAPISource() error {
 	if userMode() {
 		runLine = "/usr/bin/env XDG_RUNTIME_DIR=" + runtimeDir() + " " + runLine + " --user"
 	}
-	runLine += " serve-api"
+	runLine += " serve-api --ready-fd=3"
 	runScript := strings.Join([]string{"#!/usr/bin/execlineb -P", runLine, ""}, "\n")
 	if err := os.WriteFile(filepath.Join(serviceDir, "run"), []byte(runScript), 0755); err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(serviceDir, "dependencies"), nil, 0644)
+	if err := os.WriteFile(filepath.Join(serviceDir, "notification-fd"), []byte("3\n"), 0644); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(serviceDir, "dependencies"), []byte(s6SysPropertydServiceName()+"\n"), 0644)
 }
 
 func ensureSysvisiondSource() error {
@@ -271,9 +274,12 @@ func ensureSysPropertydSource() error {
 	if err := os.WriteFile(filepath.Join(serviceDir, "type"), []byte("longrun\n"), 0644); err != nil {
 		return err
 	}
-	runLine := sysPropertydBinaryPath()
+	runLine := sysPropertydBinaryPath() + " --ready-fd=3"
 	runScript := strings.Join([]string{"#!/usr/bin/execlineb -P", runLine, ""}, "\n")
 	if err := os.WriteFile(filepath.Join(serviceDir, "run"), []byte(runScript), 0755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(serviceDir, "notification-fd"), []byte("3\n"), 0644); err != nil {
 		return err
 	}
 	return os.WriteFile(filepath.Join(serviceDir, "dependencies"), nil, 0644)
@@ -301,6 +307,12 @@ func ensureS6CoreServices() error {
 	if err := ensureS6Bundle(); err != nil {
 		return err
 	}
+	if err := migrateExistingUserAPISources(); err != nil {
+		return err
+	}
+	if err := migrateExistingUserOrchestrdSources(); err != nil {
+		return err
+	}
 	if err := validateS6Sources(); err != nil {
 		return err
 	}
@@ -313,7 +325,139 @@ func ensureS6CoreServices() error {
 	if err := liveUpdateS6(); err != nil {
 		return err
 	}
+	if err := restartUpdatedCoreServices(); err != nil {
+		return err
+	}
 	return liveStartS6(s6SysCgroupdServiceName())
+}
+
+func restartUpdatedCoreServices() error {
+	services := []struct {
+		name  string
+		ready bool
+	}{{s6SysPropertydServiceName(), true}, {"servicectl-api", true}}
+	entries, err := os.ReadDir(s6SourceRoot())
+	if err != nil {
+		return err
+	}
+	for _, prefix := range []string{"servicectl-api-user-", "sysvisiond-user-"} {
+		for _, entry := range entries {
+			if entry.IsDir() && strings.HasPrefix(entry.Name(), prefix) {
+				services = append(services, struct {
+					name  string
+					ready bool
+				}{entry.Name(), true})
+			}
+		}
+	}
+	services = append(services,
+		struct {
+			name  string
+			ready bool
+		}{"sysvisiond", true},
+		struct {
+			name  string
+			ready bool
+		}{s6SysCgroupdServiceName(), false},
+	)
+	for _, service := range services {
+		if err := restartWantedS6Service(service.name, service.ready); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func restartWantedS6Service(service string, ready bool) error {
+	serviceDir := filepath.Join(filepath.Dir(s6LiveDir()), "service", service)
+	if _, err := os.Stat(serviceDir); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	text, code, err := commandOutputFunc("/bin/s6-svstat", "-o", "wantedup", serviceDir)
+	if err != nil || code != 0 {
+		return fmt.Errorf("query s6 service %s: %s", service, strings.TrimSpace(text))
+	}
+	if !strings.EqualFold(strings.TrimSpace(text), "true") {
+		return nil
+	}
+	text, code, err = commandOutputFunc("/bin/s6-svc", "-d", "-wD", "-T", "10000", serviceDir)
+	if err != nil || code != 0 {
+		return fmt.Errorf("stop s6 service %s: %s", service, strings.TrimSpace(text))
+	}
+	wait := "-wU"
+	if ready {
+		wait = "-wR"
+	}
+	text, code, err = commandOutputFunc("/bin/s6-svc", "-u", wait, "-T", "10000", serviceDir)
+	if err == nil && code == 0 {
+		return nil
+	}
+	return fmt.Errorf("restart s6 service %s: %s", service, strings.TrimSpace(text))
+}
+
+func migrateExistingUserAPISources() error {
+	entries, err := os.ReadDir(s6SourceRoot())
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "servicectl-api-user-") {
+			continue
+		}
+		serviceDir := filepath.Join(s6SourceRoot(), entry.Name())
+		runPath := filepath.Join(serviceDir, "run")
+		run, err := os.ReadFile(runPath)
+		if err != nil {
+			return err
+		}
+		runText := string(run)
+		if !strings.Contains(runText, " --ready-fd=") {
+			runText = strings.Replace(runText, " serve-api", " serve-api --ready-fd=3", 1)
+			if err := os.WriteFile(runPath, []byte(runText), 0755); err != nil {
+				return err
+			}
+		}
+		if err := os.WriteFile(filepath.Join(serviceDir, "notification-fd"), []byte("3\n"), 0644); err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(serviceDir, "dependencies"), []byte(s6SysPropertydServiceName()+"\n"), 0644); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func migrateExistingUserOrchestrdSources() error {
+	entries, err := os.ReadDir(s6SourceRoot())
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.HasSuffix(entry.Name(), "-orchestrd") {
+			continue
+		}
+		serviceDir := filepath.Join(s6SourceRoot(), entry.Name())
+		run, err := os.ReadFile(filepath.Join(serviceDir, "run"))
+		if err != nil {
+			return err
+		}
+		if !strings.Contains(string(run), "sys-orchestrd --user ") {
+			continue
+		}
+		dependencies, err := os.ReadFile(filepath.Join(serviceDir, "dependencies"))
+		if err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		deps := uniqueLinesPreserveOrder(string(dependencies))
+		deps = appendUniqueLinePreserveOrder(deps, "sysvisiond")
+		if err := writeS6OrchestrdDependencies(serviceDir, deps); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func enableWithS6(unitName string) error {
@@ -334,6 +478,9 @@ func enableWithS6(unitName string) error {
 	runLine += " --unit " + strings.TrimSuffix(resolveUnitAlias(unitName), ".service") + ".service"
 	runScript := strings.Join([]string{"#!/usr/bin/execlineb -P", runLine, ""}, "\n")
 	if err := os.WriteFile(filepath.Join(serviceDir, "run"), []byte(runScript), 0755); err != nil {
+		return err
+	}
+	if err := writeS6OrchestrdDependencies(serviceDir, s6OrchestrdBaseDependencies()); err != nil {
 		return err
 	}
 	entries, _ := os.ReadFile(s6BundleContentsPath())
@@ -493,11 +640,7 @@ func refreshS6OrchestrdDependencies() error {
 			owners[owner] = true
 		}
 	}
-	baseDeps := make([]string, 0, 2)
-	if !userMode() {
-		baseDeps = append(baseDeps, "dinit")
-	}
-	baseDeps = append(baseDeps, s6SysvisiondServiceName())
+	baseDeps := s6OrchestrdBaseDependencies()
 	for owner := range owners {
 		serviceDir := ensureOwnerSourceDir(owner)
 		if info, statErr := os.Stat(serviceDir); statErr != nil || !info.IsDir() {
@@ -511,15 +654,26 @@ func refreshS6OrchestrdDependencies() error {
 			deps = append(deps, dep)
 		}
 		deps = uniqueSortedStrings(deps)
-		depsContent := ""
-		if len(deps) > 0 {
-			depsContent = strings.Join(deps, "\n") + "\n"
-		}
-		if err := os.WriteFile(filepath.Join(serviceDir, "dependencies"), []byte(depsContent), 0644); err != nil {
+		if err := writeS6OrchestrdDependencies(serviceDir, deps); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func s6OrchestrdBaseDependencies() []string {
+	if userMode() {
+		return uniqueSortedStrings([]string{"sysvisiond", s6SysvisiondServiceName()})
+	}
+	return uniqueSortedStrings([]string{"dinit", s6SysvisiondServiceName()})
+}
+
+func writeS6OrchestrdDependencies(serviceDir string, dependencies []string) error {
+	content := ""
+	if dependencies = uniqueSortedStrings(dependencies); len(dependencies) > 0 {
+		content = strings.Join(dependencies, "\n") + "\n"
+	}
+	return os.WriteFile(filepath.Join(serviceDir, "dependencies"), []byte(content), 0644)
 }
 
 func s6OwnerMatchesCurrentMode(serviceDir string) bool {

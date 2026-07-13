@@ -1,0 +1,17 @@
+portal.service · Portal service
+● active enabled · user@1000 · dbus
+PID 52
+/home/demo/.config/systemd/user/portal.service
+
+ORCHESTRATION
+sysvbus · user@1000 healthy · connected
+  endpoint=/run/user/1000/servicectl/events.sock · observed=2026-07-12 10:30:00
+  evidence component_status=healthy checked=2026-07-12 10:30:00
+    │ controls
+    ▼
+portal.service healthy · active · pid 52
+  observed=2026-07-12 10:30:00
+  evidence sysvision_snapshot=healthy checked=2026-07-12 10:30:00
+    └── activates ── dbus · user@1000 healthy · owned · owner :1.42
+        owner=:1.42 · observed=2026-07-12 10:30:00
+        evidence component_status=healthy checked=2026-07-12 10:30:00

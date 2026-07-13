@@ -3,6 +3,8 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"net"
@@ -15,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"servicectl/internal/statusview"
 	"servicectl/internal/util"
 	"servicectl/internal/visionapi"
 )
@@ -24,15 +27,30 @@ type eventSubscriber struct {
 }
 
 type servicectlPlaneServer struct {
-	mode             string
-	cfg              Config
-	hub              *servicectlEventHub
-	mu               sync.Mutex
-	queryUnitLists   func(string) (visionapi.UnitListsResponse, error)
-	replaceUnitList  func(string, string, []string) error
-	scanRunnerUnits  func(Config) ([]string, error)
-	enabledUnits     func() []string
-	collectSnapshots func(Config, []string) visionapi.UnitsResponse
+	mode                   string
+	cfg                    Config
+	hub                    *servicectlEventHub
+	mu                     sync.Mutex
+	queryUnitLists         func(string) (visionapi.UnitListsResponse, error)
+	queryUnitGroups        func(string, string) (visionapi.UnitGroupsResponse, error)
+	replaceUnitList        func(string, string, []string) error
+	scanRunnerUnits        func(Config) ([]string, error)
+	enabledUnits           func() []string
+	collectSnapshots       func(Config, []string) visionapi.UnitsResponse
+	canonicalizeStatusUnit func(Config, string) (string, error)
+	buildStatusManifest    func(Config, string, visionapi.UnitListsResponse, string) (visionapi.StatusParticipationManifest, error)
+}
+
+var errStatusManifestUnitNotFound = errors.New("status manifest unit not found")
+
+type statusManifestAPIError struct {
+	Error statusManifestAPIErrorDetail `json:"error"`
+}
+
+type statusManifestAPIErrorDetail struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+	Unit    string `json:"unit,omitempty"`
 }
 
 type servicectlEventHub struct {
@@ -78,7 +96,7 @@ func (h *servicectlEventHub) publish(event visionapi.EventEnvelope) {
 	}
 }
 
-func (h *servicectlEventHub) serveIngress(mode string, socketPath string) error {
+func (h *servicectlEventHub) serveIngress(mode string, socketPath string, notifyReady func()) error {
 	if err := visionapi.PrepareUnixDatagramListener(socketPath); err != nil {
 		return err
 	}
@@ -90,7 +108,12 @@ func (h *servicectlEventHub) serveIngress(mode string, socketPath string) error 
 		_ = conn.Close()
 		_ = os.Remove(socketPath)
 	}()
-	_ = os.Chmod(socketPath, 0660)
+	if err := os.Chmod(socketPath, 0660); err != nil {
+		return err
+	}
+	if notifyReady != nil {
+		notifyReady()
+	}
 	buf := make([]byte, 65535)
 	for {
 		n, _, err := conn.ReadFromUnix(buf)
@@ -290,14 +313,17 @@ func publishServicectlCommandEvent(action string, unitName string, result string
 
 func newServicectlPlaneServer(mode string, hub *servicectlEventHub) servicectlPlaneServer {
 	return servicectlPlaneServer{
-		mode:             visionapi.PlaneForMode(mode).Mode,
-		cfg:              buildConfig(strings.EqualFold(strings.TrimSpace(mode), visionapi.ModeUser)),
-		hub:              hub,
-		queryUnitLists:   propertyUnitListsForMode,
-		replaceUnitList:  propertyReplaceUnitListForMode,
-		scanRunnerUnits:  scanRunnerUnits,
-		enabledUnits:     enabledStandaloneServicesFromS6Bundle,
-		collectSnapshots: collectUnitSnapshots,
+		mode:                   visionapi.PlaneForMode(mode).Mode,
+		cfg:                    buildConfig(strings.EqualFold(strings.TrimSpace(mode), visionapi.ModeUser)),
+		hub:                    hub,
+		queryUnitLists:         propertyUnitListsForMode,
+		queryUnitGroups:        propertyUnitGroupsForMode,
+		replaceUnitList:        propertyReplaceUnitListForMode,
+		scanRunnerUnits:        scanRunnerUnits,
+		enabledUnits:           enabledStandaloneServicesFromS6Bundle,
+		collectSnapshots:       collectUnitSnapshots,
+		canonicalizeStatusUnit: canonicalStatusManifestUnitForConfig,
+		buildStatusManifest:    buildStatusParticipationManifestForConfig,
 	}
 }
 
@@ -374,6 +400,48 @@ func (s *servicectlPlaneServer) handler() http.Handler {
 			}
 		}
 	})
+	mux.HandleFunc("/v1/status-manifest/", func(w http.ResponseWriter, r *http.Request) {
+		name := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/v1/status-manifest/"))
+		if r.Method != http.MethodGet {
+			writeStatusManifestAPIError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Status manifest only supports GET.", name)
+			return
+		}
+		if name == "" || strings.Contains(name, "/") {
+			writeStatusManifestAPIError(w, http.StatusBadRequest, "invalid_unit", "A single unit name is required.", name)
+			return
+		}
+		name = strings.TrimSuffix(name, ".service") + ".service"
+		canonicalName, err := s.canonicalizeStatusUnit(s.cfg, name)
+		if err != nil {
+			if errors.Is(err, errStatusManifestUnitNotFound) {
+				writeStatusManifestAPIError(w, http.StatusNotFound, "unit_not_found", err.Error(), name)
+				return
+			}
+			writeStatusManifestAPIError(w, http.StatusInternalServerError, "manifest_build_failed", err.Error(), name)
+			return
+		}
+		name = canonicalName
+		lists, err := s.queryUnitLists(s.mode)
+		if err != nil {
+			writeStatusManifestAPIError(w, http.StatusBadGateway, "manager_unavailable", err.Error(), name)
+			return
+		}
+		orchestrator, err := s.statusOrchestrator(name, lists)
+		if err != nil {
+			writeStatusManifestAPIError(w, http.StatusBadGateway, "manager_unavailable", err.Error(), name)
+			return
+		}
+		manifest, err := s.buildStatusManifest(s.cfg, name, lists, orchestrator)
+		if err != nil {
+			if errors.Is(err, errStatusManifestUnitNotFound) {
+				writeStatusManifestAPIError(w, http.StatusNotFound, "unit_not_found", err.Error(), name)
+				return
+			}
+			writeStatusManifestAPIError(w, http.StatusInternalServerError, "manifest_build_failed", err.Error(), name)
+			return
+		}
+		util.WriteJSON(w, manifest)
+	})
 	mux.HandleFunc("/v1/unit/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -394,6 +462,116 @@ func (s *servicectlPlaneServer) handler() http.Handler {
 		util.WriteJSON(w, snapshot)
 	})
 	return mux
+}
+
+func writeStatusManifestAPIError(w http.ResponseWriter, status int, code, message, unit string) {
+	w.WriteHeader(status)
+	util.WriteJSON(w, statusManifestAPIError{Error: statusManifestAPIErrorDetail{
+		Code:    code,
+		Message: message,
+		Unit:    unit,
+	}})
+}
+
+func (s *servicectlPlaneServer) statusOrchestrator(unitName string, lists visionapi.UnitListsResponse) (string, error) {
+	return statusOrchestratorFromLists(s.mode, unitName, lists, s.queryUnitGroups)
+}
+
+func statusOrchestratorFromLists(mode, unitName string, lists visionapi.UnitListsResponse, queryUnitGroups func(string, string) (visionapi.UnitGroupsResponse, error)) (string, error) {
+	canonical := normalizeServiceUnitName(unitName)
+	if statusListContainsUnit(lists.EnabledUnits, canonical) {
+		return s6OrchestrdServiceName(canonical), nil
+	}
+	if !statusListContainsUnit(lists.EffectiveUnits, canonical) || len(lists.EnabledGroups) == 0 {
+		return "", nil
+	}
+	if queryUnitGroups == nil {
+		return "", fmt.Errorf("unit group query is unavailable")
+	}
+	groups, err := queryUnitGroups(mode, canonical)
+	if err != nil {
+		return "", fmt.Errorf("query group ownership for %s: %w", canonical, err)
+	}
+	enabledGroups := make(map[string]bool, len(lists.EnabledGroups))
+	for _, group := range lists.EnabledGroups {
+		enabledGroups[strings.TrimSpace(group)] = true
+	}
+	owners := make([]string, 0, len(groups.Groups))
+	for _, group := range groups.Groups {
+		name := strings.TrimSpace(group.Name)
+		if group.Enabled && enabledGroups[name] {
+			owners = append(owners, name)
+		}
+	}
+	if len(owners) == 0 {
+		if statusListContainsUnit(lists.RunnerUnits, canonical) {
+			return "", nil
+		}
+		return "", fmt.Errorf("enabled group ownership for %s is incomplete", canonical)
+	}
+	sort.Strings(owners)
+	return s6GroupOrchestrdServiceName(owners[0]), nil
+}
+
+func statusListContainsUnit(units []string, canonical string) bool {
+	for _, unit := range units {
+		if normalizeServiceUnitName(unit) == canonical {
+			return true
+		}
+	}
+	return false
+}
+
+func canonicalStatusManifestUnitForConfig(cfg Config, unitName string) (string, error) {
+	unitSnapshotConfigMu.Lock()
+	defer unitSnapshotConfigMu.Unlock()
+	previous := config
+	config = cfg
+	defer func() { config = previous }()
+
+	return statusManifestUnitName(resolveUnitAlias(unitName))
+}
+
+func buildStatusParticipationManifestForConfig(cfg Config, unitName string, lists visionapi.UnitListsResponse, orchestrator string) (visionapi.StatusParticipationManifest, error) {
+	unitSnapshotConfigMu.Lock()
+	defer unitSnapshotConfigMu.Unlock()
+	previous := config
+	config = cfg
+	defer func() { config = previous }()
+
+	unit, err := parseSystemdUnit(unitName)
+	if err != nil {
+		if isStatusUnitNotFoundError(err) {
+			return visionapi.StatusParticipationManifest{}, fmt.Errorf("%w: %v", errStatusManifestUnitNotFound, err)
+		}
+		return visionapi.StatusParticipationManifest{}, err
+	}
+	socketUnit, socketErr := parseOptionalSocketUnit(unit.Name)
+	if socketErr != nil {
+		socketUnit = nil
+	}
+	generatedAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(lists.GeneratedAt))
+	if err != nil {
+		generatedAt = time.Now().UTC()
+	}
+	uid := uint32(0)
+	if cfg.Mode == visionapi.ModeUser {
+		uid = uint32(os.Getuid())
+	}
+	manifest, err := buildStatusParticipationManifest(statusManifestInput{
+		Unit:                unit,
+		SocketUnit:          socketUnit,
+		Mode:                cfg.Mode,
+		UID:                 uid,
+		Enabled:             strings.TrimSpace(orchestrator) != "",
+		OrchestratorService: orchestrator,
+		GeneratedAt:         generatedAt,
+	})
+	if err != nil {
+		return visionapi.StatusParticipationManifest{}, err
+	}
+	manifest.Source = string(statusview.EvidenceManager)
+	return manifest, nil
 }
 
 func (s *servicectlPlaneServer) refreshPropertyLists() error {
@@ -426,16 +604,11 @@ func (s *servicectlPlaneServer) ingressSocketPath() string {
 	return visionapi.ServicectlEventsSocketPathForMode(s.mode)
 }
 
-func (s *servicectlPlaneServer) serveIngress() error {
-	for {
-		if err := s.hub.serveIngress(s.mode, s.ingressSocketPath()); err != nil {
-			fmt.Println(oneLineError(s.mode+" servicectl event ingress failed", err))
-			time.Sleep(time.Second)
-		}
-	}
+func (s *servicectlPlaneServer) serveIngress(notifyReady func()) error {
+	return s.hub.serveIngress(s.mode, s.ingressSocketPath(), notifyReady)
 }
 
-func (s *servicectlPlaneServer) serveAPI() error {
+func (s *servicectlPlaneServer) serveAPI(notifyReady func()) error {
 	socketPath := s.apiSocketPath()
 	if err := os.MkdirAll(filepath.Dir(socketPath), 0755); err != nil {
 		return fmt.Errorf("create servicectl runtime directory: %w", err)
@@ -454,6 +627,9 @@ func (s *servicectlPlaneServer) serveAPI() error {
 	if err := os.Chmod(socketPath, 0660); err != nil {
 		return fmt.Errorf("chmod servicectl api socket: %w", err)
 	}
+	if notifyReady != nil {
+		notifyReady()
+	}
 	server := &http.Server{Handler: s.handler()}
 	if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
 		return err
@@ -469,7 +645,31 @@ func selectedServicectlPlane(hub *servicectlEventHub) servicectlPlaneServer {
 	return newServicectlPlaneServer(mode, hub)
 }
 
-func servicectlAPIServer() int {
+func parseServicectlAPIReadyFD(args []string) (int, error) {
+	fs := flag.NewFlagSet("serve-api", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	readyFD := fs.Int("ready-fd", -1, "write a newline to this file descriptor after both API sockets are ready")
+	if err := fs.Parse(args); err != nil {
+		return -1, err
+	}
+	if fs.NArg() != 0 {
+		return -1, fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
+	}
+	if *readyFD >= 0 && *readyFD < 3 {
+		return -1, fmt.Errorf("ready fd must be at least 3")
+	}
+	return *readyFD, nil
+}
+
+func writeServicectlAPIReady(writer io.Writer) error {
+	if writer == nil {
+		return nil
+	}
+	_, err := io.WriteString(writer, "\n")
+	return err
+}
+
+func servicectlAPIServer(readyFD int) int {
 	hub := newServicectlEventHub()
 	server := selectedServicectlPlane(hub)
 	if err := server.refreshPropertyLists(); err != nil {
@@ -477,8 +677,31 @@ func servicectlAPIServer() int {
 		return 1
 	}
 	errCh := make(chan error, 2)
-	go func() { errCh <- server.serveIngress() }()
-	go func() { errCh <- server.serveAPI() }()
+	ingressReady := make(chan struct{})
+	apiReady := make(chan struct{})
+	var ingressReadyOnce sync.Once
+	var apiReadyOnce sync.Once
+	go func() { errCh <- server.serveIngress(func() { ingressReadyOnce.Do(func() { close(ingressReady) }) }) }()
+	go func() { errCh <- server.serveAPI(func() { apiReadyOnce.Do(func() { close(apiReady) }) }) }()
+	for ingressReady != nil || apiReady != nil {
+		select {
+		case <-ingressReady:
+			ingressReady = nil
+		case <-apiReady:
+			apiReady = nil
+		case err := <-errCh:
+			fmt.Println(oneLineError("servicectl api server failed", err))
+			return 1
+		}
+	}
+	var readyWriter io.Writer
+	if readyFD >= 3 {
+		readyWriter = os.NewFile(uintptr(readyFD), "servicectl-api-ready")
+	}
+	if err := writeServicectlAPIReady(readyWriter); err != nil {
+		fmt.Println(oneLineError("notify servicectl api readiness", err))
+		return 1
+	}
 	err := <-errCh
 	if err != nil {
 		fmt.Println(oneLineError("servicectl api server failed", err))

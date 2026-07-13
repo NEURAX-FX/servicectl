@@ -37,6 +37,9 @@ func enableGroupWithS6(group string) error {
 	if err := os.WriteFile(filepath.Join(serviceDir, "run"), []byte(runScript), 0755); err != nil {
 		return err
 	}
+	if err := writeS6OrchestrdDependencies(serviceDir, s6OrchestrdBaseDependencies()); err != nil {
+		return err
+	}
 	entries, _ := os.ReadFile(s6BundleContentsPath())
 	bundleEntries := uniqueLinesPreserveOrder(string(entries))
 	serviceName := s6GroupOrchestrdServiceName(group)

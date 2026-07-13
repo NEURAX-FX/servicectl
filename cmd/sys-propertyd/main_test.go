@@ -12,6 +12,21 @@ import (
 	"servicectl/internal/visionapi"
 )
 
+func TestNotifyReadyWritesOnce(t *testing.T) {
+	var output bytes.Buffer
+	d := newTestDaemon(t)
+	d.readyWriter = &output
+	if err := d.notifyReady(); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.notifyReady(); err != nil {
+		t.Fatal(err)
+	}
+	if got := output.String(); got != "\n" {
+		t.Fatalf("readiness output = %q", got)
+	}
+}
+
 func TestUnitListsAreModeIsolatedAndExpandEnabledGroups(t *testing.T) {
 	d := newTestDaemon(t)
 	d.defsByMode[visionapi.ModeSystem] = definitionSet{

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -45,6 +46,8 @@ type daemon struct {
 	enabledGroupsByMode map[string]map[string]bool
 	runnerUnitsByMode   map[string]map[string]bool
 	enabledInitialized  map[string]bool
+	readyWriter         io.Writer
+	readySent           bool
 }
 
 type propertyUpdateRequest struct {
@@ -70,8 +73,13 @@ func (l *syncLogger) Printf(format string, args ...any) {
 
 func main() {
 	userMode := flag.Bool("user", false, "deprecated no-op")
+	readyFD := flag.Int("ready-fd", -1, "write a newline to this file descriptor after the API socket is ready")
 	flag.Parse()
 	_ = *userMode
+	if *readyFD >= 0 && *readyFD < 3 {
+		fmt.Fprintln(os.Stderr, "ready fd must be at least 3")
+		os.Exit(1)
+	}
 	d := &daemon{
 		runtimeDir: visionapi.SystemRuntimeDir,
 		statePath:  "/var/lib/servicectl/properties/state",
@@ -100,6 +108,9 @@ func main() {
 			visionapi.ModeUser:   {},
 		},
 		enabledInitialized: map[string]bool{},
+	}
+	if *readyFD >= 3 {
+		d.readyWriter = os.NewFile(uintptr(*readyFD), "sys-propertyd-ready")
 	}
 	if err := d.run(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -337,9 +348,27 @@ func (d *daemon) run() error {
 		_ = listener.Close()
 		_ = os.Remove(socketPath)
 	}()
-	_ = os.Chmod(socketPath, 0660)
+	if err := os.Chmod(socketPath, 0660); err != nil {
+		return err
+	}
+	if err := d.notifyReady(); err != nil {
+		return err
+	}
 	server := &http.Server{Handler: d.handler()}
 	return server.Serve(listener)
+}
+
+func (d *daemon) notifyReady() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.readySent || d.readyWriter == nil {
+		return nil
+	}
+	if _, err := io.WriteString(d.readyWriter, "\n"); err != nil {
+		return err
+	}
+	d.readySent = true
+	return nil
 }
 
 func (d *daemon) handler() http.Handler {

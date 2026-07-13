@@ -51,6 +51,9 @@ func TestRuntimeDirForUID(t *testing.T) {
 	if got := SysvisionSocketPathForUID(1000); got != "/run/user/1000/servicectl/sysvision/sysvisiond.sock" {
 		t.Fatalf("SysvisionSocketPathForUID = %q", got)
 	}
+	if got := ServicectlEventsSocketPathForUID(1000); got != "/run/user/1000/servicectl/servicectl-events.sock" {
+		t.Fatalf("ServicectlEventsSocketPathForUID = %q", got)
+	}
 }
 
 func TestWatchFilterMatchesExplicitUID(t *testing.T) {

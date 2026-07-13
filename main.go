@@ -17,6 +17,7 @@ import (
 
 	"servicectl/internal/dbusactivation"
 	"servicectl/internal/dbusmanager"
+	"servicectl/internal/statusview"
 	"servicectl/internal/util"
 	"servicectl/internal/visionapi"
 )
@@ -26,6 +27,8 @@ func printHelp() {
 
 Usage:
   servicectl [--user] [--force] <command> [unit...]
+  servicectl [--user] list [--all] [--plain | --json]
+  servicectl [--user] status <unit> [--plain | --json] [--verbose]
   servicectl [--user] logs [-f] [-n lines] <unit...>
   servicectl [--user] kill <unit...> [signal]
   servicectl [--user] dinit <args...>
@@ -38,9 +41,9 @@ Core commands:
   external-manage Mark unit(s) as externally managed
   external-unmanage Clear external-managed state for unit(s)
   kill          Send a signal to unit(s); default SIGTERM
-  status        Show systemctl-like status output
+  status        Show topology-first unit status; supports --plain, --json, and --verbose
   show          Show detailed diagnostic view
-  list          List discovered units
+  list          List application units; --all includes internal services
   logs          Show logs for unit(s)
   is-active     Exit 0 if unit is active
   is-failed     Exit 0 if unit is failed
@@ -162,11 +165,24 @@ func processStartTime(pid string) string {
 	if _, err := strconv.Atoi(pid); err != nil {
 		return ""
 	}
-	out, err := exec.Command("ps", "-p", pid, "-o", "lstart=").Output()
+	out, err := processStartTimeCommand(pid).Output()
 	if err != nil {
 		return ""
 	}
 	return strings.TrimSpace(string(out))
+}
+
+func processStartTimeCommand(pid string) *exec.Cmd {
+	cmd := exec.Command("ps", "-p", pid, "-o", "lstart=")
+	cmd.Env = make([]string, 0, len(os.Environ())+1)
+	for _, value := range os.Environ() {
+		if strings.HasPrefix(value, "LC_ALL=") {
+			continue
+		}
+		cmd.Env = append(cmd.Env, value)
+	}
+	cmd.Env = append(cmd.Env, "LC_ALL=C")
+	return cmd
 }
 
 func socketManagedActiveLine(state string, runtimePhase string, runtimeChildState string) string {
@@ -1530,7 +1546,13 @@ parsedFlags:
 		groupFlag = parsedGroup
 	}
 	if action == "serve-api" {
-		os.Exit(servicectlAPIServer())
+		readyFD, err := parseServicectlAPIReadyFD(targets)
+		if err != nil {
+			fmt.Println(err)
+			fmt.Println("Usage: servicectl [--user] serve-api [--ready-fd=N]")
+			os.Exit(1)
+		}
+		os.Exit(servicectlAPIServer(readyFD))
 	}
 	if action == "ensure-s6" {
 		if len(targets) != 0 {
@@ -1622,8 +1644,18 @@ parsedFlags:
 			return
 		}
 	}
+	display, err := parseDisplayInvocation(action, targets, groupFlag)
+	if err != nil {
+		fmt.Println(err)
+		if action == "list" {
+			fmt.Println("Usage: servicectl [--user] list [--all] [--plain | --json]")
+		} else {
+			fmt.Println("Usage: servicectl [--user] status <unit> [--plain | --json] [--verbose]")
+		}
+		os.Exit(1)
+	}
 
-	if action != "logs" && action != "dinit" {
+	if action != "logs" && action != "dinit" && display.Status == nil {
 		if err := ensureUserModeReady(); err != nil {
 			fmt.Println(err)
 			os.Exit(1)
@@ -1638,8 +1670,8 @@ parsedFlags:
 		}
 		os.Exit(dinitPassthrough(targets))
 	}
-	if action == "list" {
-		os.Exit(printList())
+	if display.List != nil {
+		os.Exit(runListDisplay(os.Stdout, *display.List, currentDisplayRuntime(), defaultDisplayDataSource()))
 	}
 	if action == "enable" || action == "disable" || action == "is-enabled" {
 		if !s6Available() {
@@ -1667,6 +1699,14 @@ parsedFlags:
 		if code, handled := handleGroupAction(action, target); handled {
 			os.Exit(code)
 		}
+	}
+	if display.Status != nil {
+		os.Exit(runStatusDisplay(os.Stdout, display.Status.Unit, display.Status.Options, currentDisplayRuntime(), func(ctx context.Context, unit, mode string, uid uint32) (statusview.Model, error) {
+			if err := ensureUserModeReady(); err != nil {
+				return statusview.Model{}, &statusCollectionError{Kind: statusCollectionMandatory, Unit: strings.TrimSuffix(unit, ".service") + ".service", Err: err}
+			}
+			return collectStatusModel(ctx, unit, mode, uid, defaultStatusCollectionDependencies())
+		}))
 	}
 	for _, t := range targets {
 		if target, handled, err := maybeResolveGroupActionTarget(action, t); handled {
@@ -1701,8 +1741,6 @@ parsedFlags:
 			}
 			fmt.Printf("%s %s\n", colorize("Stopped", styleYellow), cleanName)
 			publishServicectlCommandEvent(action, cleanName, "ok")
-		case "status":
-			printStatus(cleanName)
 		case "logs":
 			printLogs(cleanName, logsFollow, logsLines)
 		case "list":

@@ -104,7 +104,7 @@ func TestCgroupV2Integration(t *testing.T) {
 		fixture.Stop()
 		waitForNoMembers(t, audit, key)
 		restarted.Stopped(key, snapshot.VisionEpoch, snapshot.Generation+1)
-		waitForState(t, restarted, key, cgrouptrack.StateStopped)
+		waitForMissingUnit(t, restarted, key)
 		waitForMissingPath(t, audit.Path(key))
 	})
 
@@ -545,6 +545,14 @@ func waitForState(t *testing.T, scheduler *scheduler, key cgrouptrack.UnitKey, s
 		return true
 	})
 	return result
+}
+
+func waitForMissingUnit(t *testing.T, scheduler *scheduler, key cgrouptrack.UnitKey) {
+	t.Helper()
+	waitForCondition(t, "unit removal", func() bool {
+		_, err := scheduler.GetUnit(context.Background(), cgrouptrack.Scope{Mode: key.Mode, UID: key.UID}, key.Unit)
+		return err != nil
+	})
 }
 
 func waitForMembers(t *testing.T, groups cgrouptrack.CgroupFS, key cgrouptrack.UnitKey, wanted ...int) []int {

@@ -144,6 +144,25 @@ func TestStoppedCancelsPendingMigrationAndPreservesPopulatedGroup(t *testing.T) 
 	}
 }
 
+func TestStoppedRemovesEmptyUnitRecord(t *testing.T) {
+	clock := &manualClock{}
+	groups := newSchedulerGroups()
+	s := newScheduler(schedulerOptions{bootID: "boot-a", settleDelay: time.Second, afterFunc: clock.AfterFunc, proc: newSchedulerProc(), groups: groups})
+	key := cgrouptrack.UnitKey{Mode: cgrouptrack.ModeSystem, Unit: "demo.service"}
+	snapshot := readySnapshot(key.Unit, visionapi.ModeSystem, 0, 10, 100, "epoch-a", 1)
+	s.Ready(&fakeVisionSource{}, snapshot)
+	groups.members[key] = map[int]bool{}
+
+	s.Stopped(key, "epoch-a", 2)
+	clock.Advance(time.Second)
+	if _, err := s.GetUnit(context.Background(), cgrouptrack.Scope{Mode: cgrouptrack.ModeSystem}, key.Unit); err == nil {
+		t.Fatal("empty stopped unit remained tracked")
+	}
+	if _, exists := groups.members[key]; exists {
+		t.Fatal("empty stopped cgroup was not removed")
+	}
+}
+
 func TestAttachRevalidatesRunningTargetAndPID(t *testing.T) {
 	proc := newSchedulerProc(
 		cgrouptrack.Process{PID: 10, UID: 1000, StartTime: 100, State: 'S'},
@@ -208,6 +227,99 @@ func TestReconcileIgnoresNeverTrackedStoppedUnits(t *testing.T) {
 	}
 	if len(units) != 0 {
 		t.Fatalf("created %d records for never-tracked stopped units", len(units))
+	}
+}
+
+func TestReconcileReplacementSourceStopsMissingUnitInSameScope(t *testing.T) {
+	groups := newSchedulerGroups()
+	key := cgrouptrack.UnitKey{Mode: cgrouptrack.ModeUser, UID: 1000, Unit: "demo.service"}
+	oldSource := &fakeVisionSource{
+		meta:  visionapi.MetaResponse{VisionEpoch: "epoch-old", Mode: visionapi.ModeUser, UID: 1000},
+		units: map[string]visionapi.UnitSnapshot{},
+	}
+	snapshot := readySnapshot(key.Unit, visionapi.ModeUser, key.UID, 10, 100, "epoch-old", 1)
+	oldSource.units[key.Unit] = snapshot
+	s := newScheduler(schedulerOptions{
+		bootID: "boot-a", proc: newSchedulerProc(cgrouptrack.Process{PID: 10, UID: 1000, StartTime: 100, State: 'S'}), groups: groups,
+	})
+	s.Ready(oldSource, snapshot)
+	groups.members[key] = map[int]bool{}
+
+	replacement := &fakeVisionSource{
+		meta:  visionapi.MetaResponse{VisionEpoch: "epoch-new", Mode: visionapi.ModeUser, UID: 1000},
+		units: map[string]visionapi.UnitSnapshot{},
+	}
+	if err := s.ReconcileSource(context.Background(), replacement); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GetUnit(context.Background(), cgrouptrack.Scope{Mode: cgrouptrack.ModeUser, UID: 1000}, key.Unit); err == nil {
+		t.Fatal("unit missing from replacement source remained tracked")
+	}
+	if _, exists := groups.members[key]; exists {
+		t.Fatal("empty cgroup from replaced source was not removed")
+	}
+}
+
+func TestReconcileReplacementSourcePreservesPopulatedMissingUnit(t *testing.T) {
+	groups := newSchedulerGroups()
+	key := cgrouptrack.UnitKey{Mode: cgrouptrack.ModeUser, UID: 1000, Unit: "demo.service"}
+	oldSource := &fakeVisionSource{
+		meta:  visionapi.MetaResponse{VisionEpoch: "epoch-old", Mode: visionapi.ModeUser, UID: 1000},
+		units: map[string]visionapi.UnitSnapshot{},
+	}
+	snapshot := readySnapshot(key.Unit, visionapi.ModeUser, key.UID, 10, 100, "epoch-old", 1)
+	oldSource.units[key.Unit] = snapshot
+	s := newScheduler(schedulerOptions{
+		bootID: "boot-a", proc: newSchedulerProc(cgrouptrack.Process{PID: 10, UID: 1000, StartTime: 100, State: 'S'}), groups: groups,
+	})
+	s.Ready(oldSource, snapshot)
+	groups.members[key] = map[int]bool{10: true}
+
+	replacement := &fakeVisionSource{
+		meta:  visionapi.MetaResponse{VisionEpoch: "epoch-new", Mode: visionapi.ModeUser, UID: 1000},
+		units: map[string]visionapi.UnitSnapshot{},
+	}
+	if err := s.ReconcileSource(context.Background(), replacement); err != nil {
+		t.Fatal(err)
+	}
+	status, err := s.GetUnit(context.Background(), cgrouptrack.Scope{Mode: cgrouptrack.ModeUser, UID: 1000}, key.Unit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.State != cgrouptrack.StateOrphanedPopulated || status.MemberCount != 1 {
+		t.Fatalf("status = %#v", status)
+	}
+}
+
+func TestReconcileVisionSourcesRefreshesChangedIdentity(t *testing.T) {
+	clock := &manualClock{}
+	proc := newSchedulerProc(
+		cgrouptrack.Process{PID: 10, UID: 0, StartTime: 100, State: 'S'},
+		cgrouptrack.Process{PID: 11, UID: 0, StartTime: 200, State: 'S'},
+	)
+	groups := newSchedulerGroups()
+	source := &fakeVisionSource{
+		meta:  visionapi.MetaResponse{VisionEpoch: "epoch-a", Mode: visionapi.ModeSystem},
+		units: map[string]visionapi.UnitSnapshot{},
+	}
+	first := readySnapshot("demo.service", visionapi.ModeSystem, 0, 10, 100, "epoch-a", 1)
+	source.units[first.Name] = first
+	s := newScheduler(schedulerOptions{
+		bootID: "boot-a", settleDelay: 100 * time.Millisecond, afterFunc: clock.AfterFunc,
+		proc: proc, groups: groups,
+		migrator: cgrouptrack.Migrator{Proc: proc, Groups: groups, MaxRounds: 2, Deadline: time.Second},
+	})
+	if err := s.ReconcileSource(context.Background(), source); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(100 * time.Millisecond)
+	second := readySnapshot("demo.service", visionapi.ModeSystem, 0, 11, 200, "epoch-a", 2)
+	source.units[second.Name] = second
+
+	reconcileVisionSources(context.Background(), s, []VisionSource{source}, nil)
+	clock.Advance(100 * time.Millisecond)
+	if !reflect.DeepEqual(groups.moves, []int{10, 11}) {
+		t.Fatalf("periodic source reconciliation moves = %#v", groups.moves)
 	}
 }
 

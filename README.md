@@ -36,6 +36,39 @@ Key rules:
 - `sys-orchestrd` is the local state machine for enabled units/groups and calls `servicectl`
 - `s6` supervises orchestrators and static startup dependencies
 
+## Status Topology
+
+`servicectl status UNIT` is a topology-first operational view. It shows the
+service runtime state separately from the health of the concrete control,
+supervision, bus, observation, and accounting components that participate in
+that unit.
+
+```bash
+servicectl status demo.service
+servicectl status demo.service --plain
+servicectl status demo.service --verbose
+servicectl status demo.service --json
+```
+
+- Terminal output uses a primary control path plus side branches. Below 96
+  columns it becomes an indented tree without dropping nodes or relationships.
+- `--plain` uses ASCII structure, no ANSI styling, and no width truncation.
+- `--verbose` expands evidence, endpoints, observation times, process metadata,
+  and the complete bounded log sample. It cannot be combined with `--json`.
+- `--json` is status schema version 2 and contains typed topology nodes and
+  edges. `list --json` remains schema version 1.
+- `active (degraded)` means the service is running but a declared participant is
+  conclusively unhealthy or missing.
+- `active (unknown)` means the service is running but a declared participant
+  could not be observed reliably.
+- `NO_COLOR`, `TERM=dumb`, and non-TTY output disable color without removing
+  state labels or topology structure.
+
+Status exit codes are `0` for a resolved healthy model, `3` for failed,
+degraded, or unknown aggregate health, `4` for a missing unit, and `1` for
+usage, mandatory collection, rendering, or encoding errors. Lifecycle state is
+available separately as `summary.runtime_state` in JSON.
+
 ## Virtual Targets
 
 `servicectl` can now accept virtual target inputs such as `group:audio` and `pipewire.target`.
@@ -186,6 +219,7 @@ bash ./scripts/test-sys-orchestrd.sh
 bash ./scripts/test-group-orchestration.sh
 bash ./scripts/test-s6-orchestrd.sh
 bash ./scripts/test-cgroupd-integration.sh --self-test
+bash ./scripts/test-status-topology.sh
 ```
 
 Real cgroup migration tests are opt-in and require an explicitly delegated,

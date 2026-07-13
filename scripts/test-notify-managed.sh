@@ -69,9 +69,11 @@ assert_contains "$SHOW_OUTPUT" "Dinit          ${UNIT_NAME}-notifyd"
 assert_contains "$SHOW_OUTPUT" "Service Type   notify"
 
 printf 'Checking status output...\n'
-"$ROOT/servicectl" status "$UNIT_NAME" >"$STATUS_OUTPUT"
-assert_contains "$STATUS_OUTPUT" "Manager PID:"
-assert_contains "$STATUS_OUTPUT" "Main PID:"
+"$ROOT/servicectl" status "$UNIT_NAME" --plain --verbose >"$STATUS_OUTPUT"
+assert_contains "$STATUS_OUTPUT" "${UNIT_NAME}.service - Notify-managed demo"
+assert_contains "$STATUS_OUTPUT" "PID "
+assert_contains "$STATUS_OUTPUT" "healthy | active | pid "
+assert_contains "$STATUS_OUTPUT" "manager_pid="
 
 printf 'Checking logs for notify handshake...\n'
 "$ROOT/servicectl" logs -n 50 "$UNIT_NAME" >"$LOG_OUTPUT"

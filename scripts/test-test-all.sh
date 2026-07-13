@@ -51,5 +51,6 @@ assert_contains "$OUTPUT" 'Continuing in 5 seconds. Press Ctrl-C to abort.'
 assert_contains "$CALLS" 'sleep 5'
 assert_contains "$CALLS" 'bash /root/servicectl/scripts/test-property-targets.sh'
 assert_contains "$CALLS" 'bash /root/servicectl/scripts/test-s6-orchestrd.sh'
+assert_contains "$CALLS" 'bash /root/servicectl/scripts/test-status-topology.sh'
 
 printf 'test-all warning integration test passed.\n'

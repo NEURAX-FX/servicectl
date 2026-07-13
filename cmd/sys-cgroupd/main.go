@@ -313,6 +313,7 @@ func (s *scheduler) Stopped(key cgrouptrack.UnitKey, epoch string, generation ui
 	pids, err := groups.PIDs(key)
 	state := cgrouptrack.StateStopped
 	errorText := ""
+	removeRecord := false
 	if err != nil && !errors.Is(err, os.ErrNotExist) && !errors.Is(err, unix.ENOENT) {
 		state = cgrouptrack.StateDegraded
 		errorText = err.Error()
@@ -320,11 +321,16 @@ func (s *scheduler) Stopped(key cgrouptrack.UnitKey, epoch string, generation ui
 		state = cgrouptrack.StateOrphanedPopulated
 	} else {
 		_, _ = groups.RemoveIfEmpty(key)
+		removeRecord = true
 	}
 	s.mu.Lock()
 	if current := s.units[key]; current == work {
-		current.state = state
-		current.lastError = errorText
+		if removeRecord {
+			delete(s.units, key)
+		} else {
+			current.state = state
+			current.lastError = errorText
+		}
 	}
 	s.mu.Unlock()
 }
@@ -365,16 +371,61 @@ func (s *scheduler) ReconcileSource(ctx context.Context, source VisionSource) er
 	}
 	s.mu.Lock()
 	keys := make([]cgrouptrack.UnitKey, 0)
-	for key, work := range s.units {
-		if work.source == source && !seen[key] {
+	mode := cgrouptrack.Mode(meta.Mode)
+	uid := meta.UID
+	if mode == cgrouptrack.ModeSystem {
+		uid = 0
+	}
+	for key := range s.units {
+		if key.Mode == mode && key.UID == uid && !seen[key] {
 			keys = append(keys, key)
 		}
 	}
 	s.mu.Unlock()
 	for _, key := range keys {
-		s.Stopped(key, meta.VisionEpoch, 0)
+		s.Missing(key)
 	}
 	return s.ReconcileGroups(ctx)
+}
+
+func (s *scheduler) Missing(key cgrouptrack.UnitKey) {
+	s.mu.Lock()
+	work := s.units[key]
+	if work == nil {
+		s.mu.Unlock()
+		return
+	}
+	if work.timer != nil {
+		work.timer.Stop()
+		work.timer = nil
+	}
+	s.mu.Unlock()
+	groups := s.currentGroups()
+	pids, err := groups.PIDs(key)
+	if err != nil && !errors.Is(err, os.ErrNotExist) && !errors.Is(err, unix.ENOENT) {
+		s.mu.Lock()
+		if current := s.units[key]; current == work {
+			current.state = cgrouptrack.StateDegraded
+			current.lastError = err.Error()
+		}
+		s.mu.Unlock()
+		return
+	}
+	if len(pids) != 0 {
+		s.mu.Lock()
+		if current := s.units[key]; current == work {
+			current.state = cgrouptrack.StateOrphanedPopulated
+			current.lastError = ""
+		}
+		s.mu.Unlock()
+		return
+	}
+	_, _ = groups.RemoveIfEmpty(key)
+	s.mu.Lock()
+	if s.units[key] == work {
+		delete(s.units, key)
+	}
+	s.mu.Unlock()
 }
 
 func (s *scheduler) ReconcileGroups(context.Context) error {
@@ -822,6 +873,29 @@ func runSource(ctx context.Context, scheduler *scheduler, source VisionSource, l
 	}
 }
 
+func reconcileVisionSources(ctx context.Context, scheduler *scheduler, sources []VisionSource, logger *log.Logger) {
+	for _, source := range sources {
+		if source == nil {
+			continue
+		}
+		reconcileCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		err := scheduler.ReconcileSource(reconcileCtx, source)
+		cancel()
+		if err == nil {
+			continue
+		}
+		scheduler.MarkSourceOffline(source, err)
+		if logger != nil {
+			logger.Printf("periodic source reconciliation failed: %v", err)
+		}
+	}
+}
+
+type runningVisionSource struct {
+	source VisionSource
+	stop   context.CancelFunc
+}
+
 func discoverUserSources(runtimeRoot string) map[uint32]*unixVisionSource {
 	result := make(map[uint32]*unixVisionSource)
 	entries, err := os.ReadDir(runtimeRoot)
@@ -999,7 +1073,7 @@ func main() {
 	go func() { errCh <- server.Serve(ctx) }()
 	systemSource := &unixVisionSource{path: visionapi.SysvisionSocketPathForMode(visionapi.ModeSystem), trustedMode: visionapi.ModeSystem}
 	go runSource(ctx, scheduler, systemSource, logger)
-	startedUsers := make(map[uint32]context.CancelFunc)
+	startedUsers := make(map[uint32]runningVisionSource)
 	reconcile := time.NewTicker(cfg.reconcileInterval)
 	defer reconcile.Stop()
 	discover := time.NewTicker(2 * time.Second)
@@ -1007,8 +1081,8 @@ func main() {
 	for {
 		select {
 		case <-ctx.Done():
-			for _, stop := range startedUsers {
-				stop()
+			for _, running := range startedUsers {
+				running.stop()
 			}
 			_ = scheduler.saveRegistry()
 			<-errCh
@@ -1023,19 +1097,28 @@ func main() {
 			_ = scheduler.ReconcileGroups(ctx)
 		case <-reconcile.C:
 			tryRecoverGroups(cfg, mountSystem, scheduler, server, logger)
+			sources := make([]VisionSource, 0, len(startedUsers)+1)
+			sources = append(sources, systemSource)
+			for _, running := range startedUsers {
+				sources = append(sources, running.source)
+			}
+			reconcileVisionSources(ctx, scheduler, sources, logger)
 			_ = scheduler.ReconcileGroups(ctx)
+			if err := scheduler.saveRegistry(); err != nil {
+				logger.Printf("save registry after reconciliation: %v", err)
+			}
 		case <-discover.C:
 			found := discoverUserSources(cfg.runtimeRoot)
 			for uid, source := range found {
 				if _, ok := startedUsers[uid]; !ok {
 					sourceCtx, stop := context.WithCancel(ctx)
-					startedUsers[uid] = stop
+					startedUsers[uid] = runningVisionSource{source: source, stop: stop}
 					go runSource(sourceCtx, scheduler, source, logger)
 				}
 			}
-			for uid, stop := range startedUsers {
+			for uid, running := range startedUsers {
 				if _, ok := found[uid]; !ok {
-					stop()
+					running.stop()
 					delete(startedUsers, uid)
 				}
 			}

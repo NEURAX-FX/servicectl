@@ -37,11 +37,12 @@ START_TIME="$(date --iso-8601=seconds)"
 sleep 1
 
 printf 'Checking idle socketd status...\n'
-"$ROOT/servicectl" --user status service-notify-demo >"$STATUS_IDLE"
-assert_contains "$STATUS_IDLE" "Active: active (socket manager running, backend idle)"
-assert_contains "$STATUS_IDLE" "Child: idle"
-assert_contains "$STATUS_IDLE" "Status: listening"
-assert_contains "$STATUS_IDLE" "Manager PID:"
+"$ROOT/servicectl" --user status service-notify-demo --plain --verbose >"$STATUS_IDLE"
+assert_contains "$STATUS_IDLE" "service-notify-demo.service - Service notify socket activation demo"
+assert_contains "$STATUS_IDLE" "active  disabled - user@"
+assert_contains "$STATUS_IDLE" "ORCHESTRATION"
+assert_contains "$STATUS_IDLE" "service-notify-demo.service"
+assert_contains "$STATUS_IDLE" "manager_pid="
 
 printf 'Triggering socket activation...\n'
 RESPONSE="$(printf '' | socat - UNIX-CONNECT:"$SOCKET_PATH")"
@@ -52,11 +53,12 @@ fi
 sleep 1
 
 printf 'Checking active backend status...\n'
-"$ROOT/servicectl" --user status service-notify-demo >"$STATUS_ACTIVE"
-assert_contains "$STATUS_ACTIVE" "Active: active (socket manager running, backend running)"
-assert_contains "$STATUS_ACTIVE" "Child: running"
-assert_contains "$STATUS_ACTIVE" "Main PID:"
-assert_contains "$STATUS_ACTIVE" "Status: notify-echod accepting connections"
+"$ROOT/servicectl" --user status service-notify-demo --plain --verbose >"$STATUS_ACTIVE"
+assert_contains "$STATUS_ACTIVE" "active  disabled - user@"
+assert_contains "$STATUS_ACTIVE" "PID "
+assert_contains "$STATUS_ACTIVE" "healthy | active | pid "
+assert_contains "$STATUS_ACTIVE" "manager_pid="
+assert_contains "$STATUS_ACTIVE" "notify-echod accepting connections"
 
 printf 'Checking rsyslog-backed logs...\n'
 grep -F "$JOURNAL_TAG" /var/log/messages >"$SYSLOG_OUTPUT"

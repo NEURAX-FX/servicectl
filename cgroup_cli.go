@@ -111,6 +111,41 @@ func defaultCgroupRequest(ctx context.Context, path string, request cgrouptrack.
 	return cgrouptrack.NewClient(path).Do(ctx, request)
 }
 
+func queryStatusCgroupUnit(ctx context.Context, path, mode string, uid uint32, unit string, requestFn func(context.Context, string, cgrouptrack.Request) (cgrouptrack.Response, error)) (cgrouptrack.UnitStatus, error) {
+	if requestFn == nil {
+		requestFn = defaultCgroupRequest
+	}
+	requestMode := cgrouptrack.ModeSystem
+	requestUID := uint32(0)
+	if strings.EqualFold(strings.TrimSpace(mode), "user") {
+		requestMode = cgrouptrack.ModeUser
+		requestUID = uid
+	}
+	request := cgrouptrack.Request{
+		Operation: cgrouptrack.OpGetUnit,
+		Mode:      requestMode,
+		UID:       requestUID,
+		Unit:      canonicalCgroupUnit(unit),
+	}
+	if err := request.Validate(); err != nil {
+		return cgrouptrack.UnitStatus{}, err
+	}
+	response, err := requestFn(ctx, path, request)
+	if err != nil {
+		return cgrouptrack.UnitStatus{}, err
+	}
+	if !response.OK {
+		if response.Error != nil {
+			return cgrouptrack.UnitStatus{}, response.Error
+		}
+		return cgrouptrack.UnitStatus{}, errors.New("cgroup daemon request failed")
+	}
+	if response.Unit == nil {
+		return cgrouptrack.UnitStatus{}, os.ErrNotExist
+	}
+	return *response.Unit, nil
+}
+
 func printCgroupResponse(output io.Writer, request cgrouptrack.Request, response cgrouptrack.Response) error {
 	if !response.OK {
 		if response.Error != nil {

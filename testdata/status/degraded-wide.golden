@@ -1,0 +1,37 @@
+demo.service · Demo worker
+● active (degraded) enabled · system · notify
+PID 42 · running 1m 30s
+/etc/systemd/system/demo.service
+
+ORCHESTRATION
+servicectl-api · system healthy · active · pid 9
+    │ controls
+    ▼
+s6 supervisor · system healthy · active · pid 10
+    │ supervises
+    ▼
+sys-orchestrd · demo.service healthy · active · pid 11
+    │ controls
+    ▼
+dinit · demo-notifyd healthy · active · pid 12
+    │ supervises
+    ▼
+sys-notifyd · demo-notifyd healthy · running · pid 41
+    │ supervises
+    ▼
+demo.service healthy · active · pid 42
+    ├── accounts ── sys-cgroupd · system degraded · missing · pid 13
+    ├── observes ── sysvisiond · system healthy · active · pid 14
+    │   └── observes ── (see demo.service)
+    └── observes ── (see sysvisiond · system)
+
+DIAGNOSTICS
+! Expected cgroup controller status is unavailable.
+  Hint: Inspect servicectl cgroup status.
+
+RECENT LOGS
+10:29:55 log line 3
+10:29:56 log line 4
+10:29:57 error log line 5
+10:29:58 log line 6
+10:29:59 log line 7

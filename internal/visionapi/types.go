@@ -36,6 +36,14 @@ const (
 	LifecycleUnknown           = "unknown"
 	LifecycleReady             = "ready"
 	LifecycleStopped           = "stopped"
+	StatusManifestVersion      = 1
+)
+
+const (
+	StatusNamespaceAccounting  = "accounting"
+	StatusNamespaceBus         = "bus"
+	StatusNamespaceControl     = "control"
+	StatusNamespaceObservation = "observation"
 )
 
 type Plane struct {
@@ -102,6 +110,10 @@ func ServicectlSocketPathForMode(mode string) string {
 	return filepath.Join(PlaneForMode(mode).RuntimeDir, SystemServicectlSockName)
 }
 
+func ServicectlSocketPathForUID(uid uint32) string {
+	return filepath.Join(RuntimeDirForUID(uid), SystemServicectlSockName)
+}
+
 func SystemServicectlEventsSocketPath() string {
 	return filepath.Join(SystemRuntimeDir, SystemServicectlEventsName)
 }
@@ -112,6 +124,10 @@ func ServicectlEventsSocketPath(userMode bool, xdgRuntimeDir string) string {
 
 func ServicectlEventsSocketPathForMode(mode string) string {
 	return filepath.Join(PlaneForMode(mode).RuntimeDir, SystemServicectlEventsName)
+}
+
+func ServicectlEventsSocketPathForUID(uid uint32) string {
+	return filepath.Join(RuntimeDirForUID(uid), SystemServicectlEventsName)
 }
 
 func PropertySocketPath(userMode bool, xdgRuntimeDir string) string {
@@ -197,6 +213,46 @@ type UnitSnapshot struct {
 	VisionEpoch      string `json:"vision_epoch"`
 	Generation       uint64 `json:"generation"`
 	Lifecycle        string `json:"lifecycle"`
+}
+
+type StatusManifestNamespace struct {
+	Name       string `json:"name"`
+	Applicable bool   `json:"applicable"`
+	Complete   bool   `json:"complete"`
+}
+
+type StatusManifestComponent struct {
+	Key         string `json:"key"`
+	Type        string `json:"type"`
+	Name        string `json:"name"`
+	Scope       string `json:"scope"`
+	Identity    string `json:"identity"`
+	ServiceName string `json:"service_name,omitempty"`
+	Endpoint    string `json:"endpoint,omitempty"`
+	BusName     string `json:"bus_name,omitempty"`
+}
+
+type StatusManifestRelationship struct {
+	Namespace string `json:"namespace"`
+	From      string `json:"from"`
+	To        string `json:"to"`
+	Relation  string `json:"relation"`
+	Primary   bool   `json:"primary"`
+}
+
+type StatusParticipationManifest struct {
+	Version       int                          `json:"version"`
+	Complete      bool                         `json:"complete"`
+	Unit          string                       `json:"unit"`
+	Mode          string                       `json:"mode"`
+	UID           uint32                       `json:"uid"`
+	Scope         string                       `json:"scope"`
+	Source        string                       `json:"source"`
+	Generation    uint64                       `json:"generation"`
+	GeneratedAt   string                       `json:"generated_at"`
+	Namespaces    []StatusManifestNamespace    `json:"namespaces"`
+	Components    []StatusManifestComponent    `json:"components"`
+	Relationships []StatusManifestRelationship `json:"relationships"`
 }
 
 type MetaResponse struct {

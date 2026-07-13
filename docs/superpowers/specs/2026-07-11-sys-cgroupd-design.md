@@ -376,7 +376,7 @@ paths.
 Rules are:
 
 - a ready/running unit with a valid MainPID enters delayed migration
-- a stopped unit with an empty group has its leaf removed
+- a stopped unit with an empty group has its leaf and active tracking record removed
 - a stopped unit with a populated group remains as `orphaned-populated`
 - a group whose unit no longer exists is removed only when empty
 - a populated group with no known unit remains as `unknown-unit`
@@ -395,9 +395,11 @@ at:
 /run/servicectl/sys-cgroupd/registry.json
 ```
 
-The registry records instance identity, last state, migration timestamps,
-retry state, and recent errors. It is root-owned, mode 0600, size-limited, and
-written by atomic replacement with directory synchronization.
+The registry records active or diagnostically retained instance identity, last
+state, migration timestamps, retry state, and recent errors. Empty stopped
+units are removed from the registry after reconciliation. The registry is
+root-owned, mode 0600, size-limited, and written by atomic replacement with
+directory synchronization.
 
 The registry is never the source of process-membership truth. Kernel cgroup
 files win when they disagree. A malformed registry is moved to a timestamped
@@ -413,7 +415,8 @@ Per-unit tracking states are:
   observed in the target group
 - `partial`: migration bounds were reached before convergence
 - `degraded`: a required query, root operation, or cgroup write is failing
-- `stopped`: the service is stopped and its group is empty or removed
+- `stopped`: a transient/recovery state while an empty stopped unit is being
+  reconciled out of the active tracking set
 - `orphaned-populated`: the service stopped while members remain
 - `unknown-unit`: a cgroup exists without a unit in a trusted plane
 - `event-source-offline`: kernel membership is retained while lifecycle state

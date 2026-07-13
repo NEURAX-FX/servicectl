@@ -59,7 +59,7 @@ func TestEnableGroupWithS6WritesUserRunScriptInUnifiedPlane(t *testing.T) {
 	tmp := t.TempDir()
 	prevConfig := config
 	defer func() { config = prevConfig }()
-	config = buildConfig(true)
+	config = buildConfig(false)
 	prevPaths := testS6PathsOverride
 	testS6PathsOverride = &s6PlanePaths{
 		SourceRoot:      filepath.Join(tmp, "s6", "rc"),
@@ -78,6 +78,10 @@ func TestEnableGroupWithS6WritesUserRunScriptInUnifiedPlane(t *testing.T) {
 		s6AvailableFunc = prevAvailable
 		commandOutputFunc = prevCommandOutput
 	}()
+	if err := ensureS6Bundle(); err != nil {
+		t.Fatal(err)
+	}
+	config = buildConfig(true)
 
 	if err := enableGroupWithS6("pipewire"); err != nil {
 		t.Fatalf("enableGroupWithS6 returned error: %v", err)
@@ -96,6 +100,13 @@ func TestEnableGroupWithS6WritesUserRunScriptInUnifiedPlane(t *testing.T) {
 	}
 	if !strings.Contains(string(contents), "group-pipewire-orchestrd") {
 		t.Fatalf("expected group service in unified bundle, got %q", string(contents))
+	}
+	dependencies, err := os.ReadFile(filepath.Join(tmp, "s6", "rc", "group-pipewire-orchestrd", "dependencies"))
+	if err != nil {
+		t.Fatalf("read dependencies: %v", err)
+	}
+	if string(dependencies) != "sysvisiond\nsysvisiond-user-0\n" {
+		t.Fatalf("user group dependencies = %q", dependencies)
 	}
 }
 
@@ -313,6 +324,9 @@ func TestEnsureS6BundleUsesOnePlaneInUserMode(t *testing.T) {
 	if !strings.Contains(string(apiRun), "servicectl --user serve-api") {
 		t.Fatalf("API run script = %q", apiRun)
 	}
+	if !strings.Contains(string(apiRun), "--ready-fd=3") {
+		t.Fatalf("API run script does not configure readiness: %q", apiRun)
+	}
 	if !strings.Contains(string(apiRun), "XDG_RUNTIME_DIR=/tmp/session-runtime") {
 		t.Fatalf("API run script does not preserve the session runtime dir: %q", apiRun)
 	}
@@ -328,6 +342,20 @@ func TestEnsureS6BundleUsesOnePlaneInUserMode(t *testing.T) {
 	}
 	if string(readyFD) != "3\n" {
 		t.Fatalf("notification fd = %q", readyFD)
+	}
+	apiReadyFD, err := os.ReadFile(filepath.Join(s6ServicectlAPISourceDir(), "notification-fd"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(apiReadyFD) != "3\n" {
+		t.Fatalf("API notification fd = %q", apiReadyFD)
+	}
+	apiDependencies, err := os.ReadFile(filepath.Join(s6ServicectlAPISourceDir(), "dependencies"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(apiDependencies) != "sys-propertyd\n" {
+		t.Fatalf("user API dependencies = %q", apiDependencies)
 	}
 	if s6SysvisiondServiceName() != "sysvisiond-user-0" {
 		t.Fatalf("user sysvisiond service name = %q", s6SysvisiondServiceName())
@@ -347,6 +375,51 @@ func TestEnsureS6BundleUsesOnePlaneInUserMode(t *testing.T) {
 	}
 	if _, err := os.Stat(s6SysCgroupdSourceDir()); !os.IsNotExist(err) {
 		t.Fatalf("user mode created sys-cgroupd source: %v", err)
+	}
+}
+
+func TestEnsureS6BundleOrdersSystemPropertyAndAPIReadiness(t *testing.T) {
+	tmp := t.TempDir()
+	previousConfig := config
+	previousPaths := testS6PathsOverride
+	t.Cleanup(func() {
+		config = previousConfig
+		testS6PathsOverride = previousPaths
+	})
+	config = buildConfig(false)
+	testS6PathsOverride = &s6PlanePaths{
+		SourceRoot:      filepath.Join(tmp, "s6", "rc"),
+		CompiledDir:     filepath.Join(tmp, "run", "s6", "compiled.servicectl"),
+		LiveDir:         filepath.Join(tmp, "run", "s6", "state"),
+		BundleDir:       filepath.Join(tmp, "s6", "rc", s6BundleName()),
+		BundleContents:  filepath.Join(tmp, "s6", "rc", s6BundleName(), "contents"),
+		DefaultContents: filepath.Join(tmp, "s6", "rc", "default", "contents"),
+	}
+	if err := ensureS6Bundle(); err != nil {
+		t.Fatal(err)
+	}
+	propertyRun, err := os.ReadFile(filepath.Join(s6SysPropertydSourceDir(), "run"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(propertyRun), "--ready-fd=3") {
+		t.Fatalf("propertyd run script = %q", propertyRun)
+	}
+	for _, serviceDir := range []string{s6SysPropertydSourceDir(), s6ServicectlAPISourceDir()} {
+		readyFD, err := os.ReadFile(filepath.Join(serviceDir, "notification-fd"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(readyFD) != "3\n" {
+			t.Fatalf("%s notification fd = %q", serviceDir, readyFD)
+		}
+	}
+	apiDependencies, err := os.ReadFile(filepath.Join(s6ServicectlAPISourceDir(), "dependencies"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(apiDependencies) != "sys-propertyd\n" {
+		t.Fatalf("system API dependencies = %q", apiDependencies)
 	}
 }
 
@@ -508,6 +581,175 @@ func TestEnsureS6CoreServicesUpdatesThenStartsCgroupd(t *testing.T) {
 	}
 }
 
+func TestRestartWantedS6Service(t *testing.T) {
+	tmp := t.TempDir()
+	previousPaths := testS6PathsOverride
+	previousCommandOutput := commandOutputFunc
+	t.Cleanup(func() {
+		testS6PathsOverride = previousPaths
+		commandOutputFunc = previousCommandOutput
+	})
+	testS6PathsOverride = &s6PlanePaths{LiveDir: filepath.Join(tmp, "run", "s6", "state")}
+	serviceDir := filepath.Join(tmp, "run", "s6", "service", "demo")
+	if err := os.MkdirAll(serviceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	commands := make([]string, 0, 3)
+	commandOutputFunc = func(name string, args ...string) (string, int, error) {
+		commands = append(commands, strings.Join(append([]string{name}, args...), " "))
+		if strings.Contains(name, "s6-svstat") {
+			return "true\n", 0, nil
+		}
+		return "", 0, nil
+	}
+
+	if err := restartWantedS6Service("demo", true); err != nil {
+		t.Fatal(err)
+	}
+	if len(commands) != 3 {
+		t.Fatalf("commands = %#v", commands)
+	}
+	if !strings.Contains(commands[1], "s6-svc -d -wD -T 10000 "+serviceDir) {
+		t.Fatalf("stop command = %q", commands[1])
+	}
+	if !strings.Contains(commands[2], "s6-svc -u -wR -T 10000 "+serviceDir) {
+		t.Fatalf("start command = %q", commands[2])
+	}
+}
+
+func TestRestartWantedS6ServiceLeavesStoppedServiceDown(t *testing.T) {
+	tmp := t.TempDir()
+	previousPaths := testS6PathsOverride
+	previousCommandOutput := commandOutputFunc
+	t.Cleanup(func() {
+		testS6PathsOverride = previousPaths
+		commandOutputFunc = previousCommandOutput
+	})
+	testS6PathsOverride = &s6PlanePaths{LiveDir: filepath.Join(tmp, "run", "s6", "state")}
+	serviceDir := filepath.Join(tmp, "run", "s6", "service", "demo")
+	if err := os.MkdirAll(serviceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	commands := make([]string, 0, 1)
+	commandOutputFunc = func(name string, args ...string) (string, int, error) {
+		commands = append(commands, strings.Join(append([]string{name}, args...), " "))
+		return "false\n", 0, nil
+	}
+
+	if err := restartWantedS6Service("demo", true); err != nil {
+		t.Fatal(err)
+	}
+	if len(commands) != 1 {
+		t.Fatalf("commands = %#v", commands)
+	}
+}
+
+func TestEnsureS6CoreServicesMigratesExistingUserAPIInUnifiedGraph(t *testing.T) {
+	tmp := t.TempDir()
+	previousConfig := config
+	previousPaths := testS6PathsOverride
+	previousCommandOutput := commandOutputFunc
+	t.Cleanup(func() {
+		config = previousConfig
+		testS6PathsOverride = previousPaths
+		commandOutputFunc = previousCommandOutput
+	})
+	config = buildConfig(false)
+	testS6PathsOverride = &s6PlanePaths{
+		SourceRoot:      filepath.Join(tmp, "s6", "rc"),
+		CompiledDir:     filepath.Join(tmp, "run", "s6", "compiled.servicectl"),
+		LiveDir:         filepath.Join(tmp, "run", "s6", "state"),
+		BundleDir:       filepath.Join(tmp, "s6", "rc", s6BundleName()),
+		BundleContents:  filepath.Join(tmp, "s6", "rc", s6BundleName(), "contents"),
+		DefaultContents: filepath.Join(tmp, "s6", "rc", "default", "contents"),
+	}
+	userAPI := filepath.Join(testS6PathsOverride.SourceRoot, "servicectl-api-user-1000")
+	if err := os.MkdirAll(userAPI, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(userAPI, "type"), []byte("longrun\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	oldRun := "#!/usr/bin/execlineb -P\n/usr/bin/env XDG_RUNTIME_DIR=/run/user/1000 /home/demo/.local/bin/servicectl --user serve-api\n"
+	if err := os.WriteFile(filepath.Join(userAPI, "run"), []byte(oldRun), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(userAPI, "dependencies"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	commandOutputFunc = func(name string, args ...string) (string, int, error) { return "", 0, nil }
+
+	if err := ensureS6CoreServices(); err != nil {
+		t.Fatal(err)
+	}
+	run, err := os.ReadFile(filepath.Join(userAPI, "run"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(run), "serve-api --ready-fd=3") {
+		t.Fatalf("migrated run script = %q", run)
+	}
+	readyFD, err := os.ReadFile(filepath.Join(userAPI, "notification-fd"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(readyFD) != "3\n" {
+		t.Fatalf("notification fd = %q", readyFD)
+	}
+	dependencies, err := os.ReadFile(filepath.Join(userAPI, "dependencies"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(dependencies) != "sys-propertyd\n" {
+		t.Fatalf("dependencies = %q", dependencies)
+	}
+}
+
+func TestEnsureS6CoreServicesMigratesExistingUserOrchestrdDependencies(t *testing.T) {
+	tmp := t.TempDir()
+	previousConfig := config
+	previousPaths := testS6PathsOverride
+	previousCommandOutput := commandOutputFunc
+	t.Cleanup(func() {
+		config = previousConfig
+		testS6PathsOverride = previousPaths
+		commandOutputFunc = previousCommandOutput
+	})
+	config = buildConfig(false)
+	testS6PathsOverride = &s6PlanePaths{
+		SourceRoot:      filepath.Join(tmp, "s6", "rc"),
+		CompiledDir:     filepath.Join(tmp, "run", "s6", "compiled.servicectl"),
+		LiveDir:         filepath.Join(tmp, "run", "s6", "state"),
+		BundleDir:       filepath.Join(tmp, "s6", "rc", s6BundleName()),
+		BundleContents:  filepath.Join(tmp, "s6", "rc", s6BundleName(), "contents"),
+		DefaultContents: filepath.Join(tmp, "s6", "rc", "default", "contents"),
+	}
+	userOrchestrd := filepath.Join(testS6PathsOverride.SourceRoot, "demo-orchestrd")
+	if err := os.MkdirAll(userOrchestrd, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	run := "#!/usr/bin/execlineb -P\n/usr/bin/env XDG_RUNTIME_DIR=/run/user/1000 /usr/bin/sys-orchestrd --user --unit demo.service\n"
+	if err := os.WriteFile(filepath.Join(userOrchestrd, "run"), []byte(run), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(userOrchestrd, "dependencies"), []byte("dependency-orchestrd\nsysvisiond-user-1000\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	commandOutputFunc = func(name string, args ...string) (string, int, error) { return "", 0, nil }
+
+	if err := ensureS6CoreServices(); err != nil {
+		t.Fatal(err)
+	}
+	dependencies, err := os.ReadFile(filepath.Join(userOrchestrd, "dependencies"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "dependency-orchestrd\nsysvisiond\nsysvisiond-user-1000\n"
+	if string(dependencies) != want {
+		t.Fatalf("dependencies = %q, want %q", dependencies, want)
+	}
+}
+
 func TestUserOrchestrdRunPreservesSessionRuntimeDir(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("XDG_RUNTIME_DIR", "/tmp/session-runtime")
@@ -519,7 +761,7 @@ func TestUserOrchestrdRunPreservesSessionRuntimeDir(t *testing.T) {
 		testS6PathsOverride = previousPaths
 		s6AvailableFunc = previousAvailable
 	})
-	config = buildConfig(true)
+	config = buildConfig(false)
 	testS6PathsOverride = &s6PlanePaths{
 		SourceRoot:      filepath.Join(tmp, "s6", "rc"),
 		CompiledDir:     filepath.Join(tmp, "run", "s6", "compiled.servicectl"),
@@ -528,6 +770,10 @@ func TestUserOrchestrdRunPreservesSessionRuntimeDir(t *testing.T) {
 		BundleContents:  filepath.Join(tmp, "s6", "rc", s6BundleName(), "contents"),
 		DefaultContents: filepath.Join(tmp, "s6", "rc", "default", "contents"),
 	}
+	if err := ensureS6Bundle(); err != nil {
+		t.Fatal(err)
+	}
+	config = buildConfig(true)
 	s6AvailableFunc = func() bool { return true }
 	unitDir := filepath.Join(tmp, "units")
 	if err := os.MkdirAll(unitDir, 0o755); err != nil {
@@ -550,6 +796,13 @@ func TestUserOrchestrdRunPreservesSessionRuntimeDir(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(s6OrchestrdSourceDir("demo.service"), "notification-fd")); !os.IsNotExist(err) {
 		t.Fatalf("ordinary orchestrator must not use notification-fd: %v", err)
+	}
+	dependencies, err := os.ReadFile(filepath.Join(s6OrchestrdSourceDir("demo.service"), "dependencies"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(dependencies) != "sysvisiond\nsysvisiond-user-0\n" {
+		t.Fatalf("user unit dependencies = %q", dependencies)
 	}
 }
 
