@@ -55,6 +55,18 @@ func TestDBusActivationDirectoriesAreModeSpecific(t *testing.T) {
 	}
 }
 
+func TestUserConfigUsesHostRuntimeDir(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", "/tmp/session-runtime")
+	userConfig := buildConfig(true)
+	wantRuntime := "/tmp/session-runtime"
+	if userConfig.DinitGenDir != filepath.Join(wantRuntime, "dinit.d/generated") {
+		t.Fatalf("DinitGenDir = %q", userConfig.DinitGenDir)
+	}
+	if userConfig.ManagedRuntimeDir != filepath.Join(wantRuntime, "servicectl/managed") {
+		t.Fatalf("ManagedRuntimeDir = %q", userConfig.ManagedRuntimeDir)
+	}
+}
+
 func TestEnableGroupWithS6WritesUserRunScriptInUnifiedPlane(t *testing.T) {
 	tmp := t.TempDir()
 	prevConfig := config
@@ -327,14 +339,15 @@ func TestEnsureS6BundleUsesOnePlaneInUserMode(t *testing.T) {
 	if !strings.Contains(string(apiRun), "--ready-fd=3") {
 		t.Fatalf("API run script does not configure readiness: %q", apiRun)
 	}
-	if !strings.Contains(string(apiRun), "XDG_RUNTIME_DIR=/tmp/session-runtime") {
-		t.Fatalf("API run script does not preserve the session runtime dir: %q", apiRun)
+	wantRuntime := "/tmp/session-runtime"
+	if !strings.Contains(string(apiRun), "XDG_RUNTIME_DIR="+wantRuntime) {
+		t.Fatalf("API run script does not preserve the host runtime dir: %q", apiRun)
 	}
 	if !strings.Contains(string(visionRun), "sysvisiond --mode=user --ready-fd=3") {
 		t.Fatalf("sysvisiond run script = %q", visionRun)
 	}
-	if !strings.Contains(string(visionRun), "XDG_RUNTIME_DIR=/tmp/session-runtime") {
-		t.Fatalf("sysvisiond run script does not preserve the session runtime dir: %q", visionRun)
+	if !strings.Contains(string(visionRun), "XDG_RUNTIME_DIR="+wantRuntime) {
+		t.Fatalf("sysvisiond run script does not preserve the host runtime dir: %q", visionRun)
 	}
 	readyFD, err := os.ReadFile(filepath.Join(s6SysvisiondSourceDir(), "notification-fd"))
 	if err != nil {
@@ -707,6 +720,7 @@ func TestEnsureS6CoreServicesMigratesExistingUserAPIInUnifiedGraph(t *testing.T)
 
 func TestEnsureS6CoreServicesMigratesExistingUserOrchestrdDependencies(t *testing.T) {
 	tmp := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", "/tmp/session-runtime")
 	previousConfig := config
 	previousPaths := testS6PathsOverride
 	previousCommandOutput := commandOutputFunc
@@ -735,7 +749,21 @@ func TestEnsureS6CoreServicesMigratesExistingUserOrchestrdDependencies(t *testin
 	if err := os.WriteFile(filepath.Join(userOrchestrd, "dependencies"), []byte("dependency-orchestrd\nsysvisiond-user-1000\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	commandOutputFunc = func(name string, args ...string) (string, int, error) { return "", 0, nil }
+	if err := os.MkdirAll(testS6PathsOverride.LiveDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	serviceDir := filepath.Join(filepath.Dir(testS6PathsOverride.LiveDir), "service", "demo-orchestrd")
+	if err := os.MkdirAll(serviceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	commands := make([]string, 0, 6)
+	commandOutputFunc = func(name string, args ...string) (string, int, error) {
+		commands = append(commands, strings.Join(append([]string{name}, args...), " "))
+		if strings.Contains(name, "s6-svstat") {
+			return "true\n", 0, nil
+		}
+		return "", 0, nil
+	}
 
 	if err := ensureS6CoreServices(); err != nil {
 		t.Fatal(err)
@@ -748,9 +776,30 @@ func TestEnsureS6CoreServicesMigratesExistingUserOrchestrdDependencies(t *testin
 	if string(dependencies) != want {
 		t.Fatalf("dependencies = %q, want %q", dependencies, want)
 	}
+	migratedRun, err := os.ReadFile(filepath.Join(userOrchestrd, "run"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRuntime := "/tmp/session-runtime"
+	if !strings.Contains(string(migratedRun), "XDG_RUNTIME_DIR="+wantRuntime+" ") {
+		t.Fatalf("migrated run script = %q", migratedRun)
+	}
+	if strings.Contains(string(migratedRun), "XDG_RUNTIME_DIR=/run/user/1000 ") {
+		t.Fatalf("migrated run script retains stale runtime: %q", migratedRun)
+	}
+	wantCommands := []string{
+		"/bin/s6-svstat -o wantedup " + serviceDir,
+		"/bin/s6-svc -d -wD -T 10000 " + serviceDir,
+		"/bin/s6-svc -u -wU -T 10000 " + serviceDir,
+	}
+	for _, want := range wantCommands {
+		if !containsString(commands, want) {
+			t.Fatalf("commands = %#v, missing %q", commands, want)
+		}
+	}
 }
 
-func TestUserOrchestrdRunPreservesSessionRuntimeDir(t *testing.T) {
+func TestUserOrchestrdRunPreservesHostRuntimeDir(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("XDG_RUNTIME_DIR", "/tmp/session-runtime")
 	previousConfig := config

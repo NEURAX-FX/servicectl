@@ -53,7 +53,11 @@ func queryUnitSnapshotViaSysvisionMode(ctx context.Context, mode, unitName strin
 func queryUnitSnapshotsViaSysvision() (visionapi.UnitsResponse, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 	defer cancel()
-	resp, err := sysvisionRequest(ctx, "/v1/query/units?refresh=0")
+	return queryUnitSnapshotsViaSysvisionWithRequest(ctx, sysvisionRequest)
+}
+
+func queryUnitSnapshotsViaSysvisionWithRequest(ctx context.Context, request func(context.Context, string) (*http.Response, error)) (visionapi.UnitsResponse, bool) {
+	resp, err := request(ctx, "/v1/query/units")
 	if err != nil {
 		return visionapi.UnitsResponse{}, false
 	}

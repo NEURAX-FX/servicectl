@@ -310,7 +310,8 @@ func ensureS6CoreServices() error {
 	if err := migrateExistingUserAPISources(); err != nil {
 		return err
 	}
-	if err := migrateExistingUserOrchestrdSources(); err != nil {
+	migratedOrchestrds, err := migrateExistingUserOrchestrdSources()
+	if err != nil {
 		return err
 	}
 	if err := validateS6Sources(); err != nil {
@@ -327,6 +328,11 @@ func ensureS6CoreServices() error {
 	}
 	if err := restartUpdatedCoreServices(); err != nil {
 		return err
+	}
+	for _, service := range migratedOrchestrds {
+		if err := restartWantedS6Service(service, false); err != nil {
+			return err
+		}
 	}
 	return liveStartS6(s6SysCgroupdServiceName())
 }
@@ -430,11 +436,12 @@ func migrateExistingUserAPISources() error {
 	return nil
 }
 
-func migrateExistingUserOrchestrdSources() error {
+func migrateExistingUserOrchestrdSources() ([]string, error) {
 	entries, err := os.ReadDir(s6SourceRoot())
 	if err != nil {
-		return err
+		return nil, err
 	}
+	migrated := make([]string, 0)
 	for _, entry := range entries {
 		if !entry.IsDir() || !strings.HasSuffix(entry.Name(), "-orchestrd") {
 			continue
@@ -442,22 +449,44 @@ func migrateExistingUserOrchestrdSources() error {
 		serviceDir := filepath.Join(s6SourceRoot(), entry.Name())
 		run, err := os.ReadFile(filepath.Join(serviceDir, "run"))
 		if err != nil {
-			return err
+			return nil, err
 		}
-		if !strings.Contains(string(run), "sys-orchestrd --user ") {
+		runText := string(run)
+		if !strings.Contains(runText, "sys-orchestrd --user ") {
 			continue
+		}
+		migratedRun := replaceS6EnvironmentAssignment(runText, "XDG_RUNTIME_DIR", s6UserSessionRuntimeDir())
+		if migratedRun != runText {
+			if err := os.WriteFile(filepath.Join(serviceDir, "run"), []byte(migratedRun), 0755); err != nil {
+				return nil, err
+			}
+			migrated = append(migrated, entry.Name())
 		}
 		dependencies, err := os.ReadFile(filepath.Join(serviceDir, "dependencies"))
 		if err != nil && !os.IsNotExist(err) {
-			return err
+			return nil, err
 		}
 		deps := uniqueLinesPreserveOrder(string(dependencies))
 		deps = appendUniqueLinePreserveOrder(deps, "sysvisiond")
 		if err := writeS6OrchestrdDependencies(serviceDir, deps); err != nil {
-			return err
+			return nil, err
 		}
 	}
-	return nil
+	return migrated, nil
+}
+
+func replaceS6EnvironmentAssignment(run, name, value string) string {
+	prefix := name + "="
+	start := strings.Index(run, prefix)
+	if start < 0 {
+		return run
+	}
+	end := strings.IndexByte(run[start:], ' ')
+	if end < 0 {
+		return run
+	}
+	end += start
+	return run[:start] + prefix + value + run[end:]
 }
 
 func enableWithS6(unitName string) error {
