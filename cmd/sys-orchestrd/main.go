@@ -200,7 +200,7 @@ func (d *daemon) initialSync(ctx context.Context) error {
 			}
 			continue
 		}
-		if snapshot.State == "STARTED" || snapshot.Phase == "ready" || snapshot.ChildState == "running" {
+		if snapshotIsRunning(snapshot) {
 			d.refreshGroups()
 			d.writeState("running", "initial-state")
 			d.publishState("running", "initial-state")
@@ -258,6 +258,17 @@ func (d *daemon) handleEvent(event visionapi.EventEnvelope) error {
 	return nil
 }
 
+func snapshotIsRunning(snapshot visionapi.UnitSnapshot) bool {
+	if !strings.EqualFold(strings.TrimSpace(snapshot.State), "STARTED") {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(snapshot.ManagedBy), "sys-notifyd") {
+		return true
+	}
+	managerPID, err := strconv.Atoi(strings.TrimSpace(snapshot.ManagerPID))
+	return err == nil && managerPID > 0
+}
+
 func (d *daemon) handleGroupChange(event visionapi.EventEnvelope) error {
 	group := strings.TrimSpace(event.Payload["group"])
 	if group == "" || !d.groups[group] {
@@ -270,7 +281,7 @@ func (d *daemon) handleGroupChange(event visionapi.EventEnvelope) error {
 			d.recordAttemptFailure(&operationError{Executor: "sysvision-api", Action: "query-unit", Target: d.unit, Err: err, Permanent: false})
 			return nil
 		}
-		if snapshot.State == "STARTED" || snapshot.Phase == "ready" || snapshot.ChildState == "running" {
+		if snapshotIsRunning(snapshot) {
 			return nil
 		}
 		d.writeState("starting", "group-enabled:"+group)

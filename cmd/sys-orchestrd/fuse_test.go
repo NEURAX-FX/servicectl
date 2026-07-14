@@ -94,6 +94,31 @@ func TestSysvisionUnitQueryPathUsesServiceStem(t *testing.T) {
 	}
 }
 
+func TestSnapshotIsRunningRejectsStaleNotifydState(t *testing.T) {
+	snapshot := visionapi.UnitSnapshot{
+		ManagedBy:  "sys-notifyd",
+		Phase:      "ready",
+		ChildState: "idle",
+		ManagerPID: "0",
+	}
+	if snapshotIsRunning(snapshot) {
+		t.Fatalf("stale notifyd snapshot is running: %#v", snapshot)
+	}
+}
+
+func TestSnapshotIsRunningRequiresLiveNotifydManager(t *testing.T) {
+	snapshot := visionapi.UnitSnapshot{
+		ManagedBy:  "sys-notifyd",
+		State:      "STARTED",
+		Phase:      "ready",
+		ChildState: "idle",
+		ManagerPID: "42",
+	}
+	if !snapshotIsRunning(snapshot) {
+		t.Fatalf("live socket manager is not running: %#v", snapshot)
+	}
+}
+
 func TestAttemptStartWithRetrySuppressedByFuse(t *testing.T) {
 	d := &daemon{
 		logger:      log.New(io.Discard, "", 0),
