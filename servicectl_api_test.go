@@ -119,6 +119,69 @@ func TestServicectlAPIRefreshDoesNotReplaceInitializedEnabledList(t *testing.T) 
 	}
 }
 
+func TestServicectlAPIAllUnitsUsesCompleteCatalog(t *testing.T) {
+	server := newServicectlPlaneServer(visionapi.ModeSystem, newServicectlEventHub())
+	server.discoverUnits = func(Config) []string {
+		return []string{"discovered", "duplicate.service"}
+	}
+	server.queryUnitLists = func(string) (visionapi.UnitListsResponse, error) {
+		return visionapi.UnitListsResponse{
+			EnabledUnits:   []string{"enabled.service", "duplicate"},
+			RunnerUnits:    []string{"runner.service"},
+			EffectiveUnits: []string{"effective.service"},
+		}, nil
+	}
+	server.collectSnapshots = func(_ Config, units []string) visionapi.UnitsResponse {
+		return visionapi.UnitsResponse{Units: []visionapi.UnitSnapshot{{Name: strings.Join(units, ",")}}}
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/v1/units?all=1", nil)
+	response := httptest.NewRecorder()
+	server.handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("code = %d, body = %s", response.Code, response.Body.String())
+	}
+	var payload visionapi.UnitsResponse
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Units) != 1 || payload.Units[0].Name != "discovered,duplicate,effective,enabled,runner" {
+		t.Fatalf("payload = %#v", payload)
+	}
+}
+
+func TestServicectlAPIDefaultUnitsUsesEffectiveList(t *testing.T) {
+	server := newServicectlPlaneServer(visionapi.ModeSystem, newServicectlEventHub())
+	server.discoverUnits = func(Config) []string {
+		t.Fatal("default list must not discover all units")
+		return nil
+	}
+	server.queryUnitLists = func(string) (visionapi.UnitListsResponse, error) {
+		return visionapi.UnitListsResponse{
+			EnabledUnits:   []string{"enabled.service"},
+			RunnerUnits:    []string{"runner.service"},
+			EffectiveUnits: []string{"effective.service"},
+		}, nil
+	}
+	server.collectSnapshots = func(_ Config, units []string) visionapi.UnitsResponse {
+		return visionapi.UnitsResponse{Units: []visionapi.UnitSnapshot{{Name: strings.Join(units, ",")}}}
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/v1/units", nil)
+	response := httptest.NewRecorder()
+	server.handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("code = %d, body = %s", response.Code, response.Body.String())
+	}
+	var payload visionapi.UnitsResponse
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Units) != 1 || payload.Units[0].Name != "effective.service" {
+		t.Fatalf("payload = %#v", payload)
+	}
+}
+
 func TestNormalizeUnitListNames(t *testing.T) {
 	got := normalizeUnitListNames([]string{"b", "a.service", "b.service", "", "a"})
 	want := []string{"a", "b"}

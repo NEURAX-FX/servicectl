@@ -56,6 +56,23 @@ func TestSystemdUnitResolverReportsAmbiguousBusName(t *testing.T) {
 	}
 }
 
+func TestSystemdUnitResolverDeduplicatesSymlinkAlias(t *testing.T) {
+	dir := t.TempDir()
+	writeUnit(t, dir, "systemd-localed.service", "notify", "org.freedesktop.locale1")
+	if err := os.Symlink("systemd-localed.service", filepath.Join(dir, "dbus-org.freedesktop.locale1.service")); err != nil {
+		t.Fatal(err)
+	}
+	resolver := NewSystemdUnitResolver([]string{dir}, "/run/managed")
+
+	matches, err := resolver.ResolveBusName("org.freedesktop.locale1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 1 || matches[0].Unit != "systemd-localed" {
+		t.Fatalf("matches = %#v, want canonical systemd-localed route", matches)
+	}
+}
+
 func TestSystemdUnitResolverRejectsPathTraversal(t *testing.T) {
 	resolver := NewSystemdUnitResolver([]string{t.TempDir()}, "/run/managed")
 	for _, name := range []string{"../outside.service", "nested/unit.service", ".service"} {

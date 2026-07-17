@@ -2,17 +2,33 @@ package dbusactivation
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"strings"
+	"syscall"
+	"time"
 )
 
 func ActivateControl(ctx context.Context, path string) error {
 	dialer := net.Dialer{}
-	conn, err := dialer.DialContext(ctx, "unix", path)
-	if err != nil {
-		return err
+	var conn net.Conn
+	for {
+		var err error
+		conn, err = dialer.DialContext(ctx, "unix", path)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, os.ErrNotExist) && !errors.Is(err, syscall.ECONNREFUSED) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(20 * time.Millisecond):
+		}
 	}
 	defer conn.Close()
 	if deadline, ok := ctx.Deadline(); ok {

@@ -284,7 +284,7 @@ func run(cfg daemonConfig, logger *log.Logger) error {
 	environments := &dbusactivation.EnvironmentStore{}
 	managed := dbusactivation.NewManagedStarter(dbusactivation.ManagedOptions{
 		Install: func(ctx context.Context, unit string) error {
-			return runCommand(ctx, cfg.servicectlPath, "install", unit)
+			return prepareManagedUnit(ctx, cfg.servicectlPath, unit)
 		},
 		Start: func(ctx context.Context, service string) error {
 			return runCommand(ctx, cfg.dinitctlPath, "start", service)
@@ -342,6 +342,10 @@ func run(cfg daemonConfig, logger *log.Logger) error {
 		logger.Printf("listening on %s with %d service directories", cfg.controlPath, len(cfg.serviceDirs))
 	}
 	return server.Serve(ctx)
+}
+
+func prepareManagedUnit(ctx context.Context, servicectlPath, unit string) error {
+	return runCommand(ctx, servicectlPath, "start", unit)
 }
 
 func runCommand(ctx context.Context, name string, args ...string) error {

@@ -36,6 +36,7 @@ type servicectlPlaneServer struct {
 	replaceUnitList        func(string, string, []string) error
 	scanRunnerUnits        func(Config) ([]string, error)
 	enabledUnits           func() []string
+	discoverUnits          func(Config) []string
 	collectSnapshots       func(Config, []string) visionapi.UnitsResponse
 	canonicalizeStatusUnit func(Config, string) (string, error)
 	buildStatusManifest    func(Config, string, visionapi.UnitListsResponse, string) (visionapi.StatusParticipationManifest, error)
@@ -321,6 +322,7 @@ func newServicectlPlaneServer(mode string, hub *servicectlEventHub) servicectlPl
 		replaceUnitList:        propertyReplaceUnitListForMode,
 		scanRunnerUnits:        scanRunnerUnits,
 		enabledUnits:           enabledStandaloneServicesFromS6Bundle,
+		discoverUnits:          discoverSystemdUnits,
 		collectSnapshots:       collectUnitSnapshots,
 		canonicalizeStatusUnit: canonicalStatusManifestUnitForConfig,
 		buildStatusManifest:    buildStatusParticipationManifestForConfig,
@@ -347,7 +349,15 @@ func (s *servicectlPlaneServer) handler() http.Handler {
 			util.WriteJSON(w, map[string]string{"error": err.Error()})
 			return
 		}
-		util.WriteJSON(w, s.collectSnapshots(s.cfg, lists.EffectiveUnits))
+		units := lists.EffectiveUnits
+		if util.ExternalManagedValueEnabled(r.URL.Query().Get("all")) {
+			units = append([]string{}, s.discoverUnits(s.cfg)...)
+			units = append(units, lists.EnabledUnits...)
+			units = append(units, lists.RunnerUnits...)
+			units = append(units, lists.EffectiveUnits...)
+			units = normalizeUnitListNames(units)
+		}
+		util.WriteJSON(w, s.collectSnapshots(s.cfg, units))
 	})
 	mux.HandleFunc("/v1/refresh", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {

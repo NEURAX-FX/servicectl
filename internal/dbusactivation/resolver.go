@@ -34,6 +34,7 @@ func (r *SystemdUnitResolver) ResolveBusName(busName string) ([]ManagedRoute, er
 		return nil, err
 	}
 	seen := make(map[string]bool)
+	seenTargets := make(map[string]bool)
 	var matches []ManagedRoute
 	for _, directory := range r.paths {
 		entries, err := os.ReadDir(directory)
@@ -52,7 +53,19 @@ func (r *SystemdUnitResolver) ResolveBusName(busName string) ([]ManagedRoute, er
 				continue
 			}
 			seen[unit] = true
-			metadata, err := parseUnitMetadata(filepath.Join(directory, entry.Name()))
+			path, err := filepath.EvalSymlinks(filepath.Join(directory, entry.Name()))
+			if err != nil {
+				continue
+			}
+			if seenTargets[path] {
+				continue
+			}
+			seenTargets[path] = true
+			unit = normalizeUnit(filepath.Base(path))
+			if unit == "" {
+				continue
+			}
+			metadata, err := parseUnitMetadata(path)
 			if err != nil {
 				continue
 			}

@@ -128,19 +128,23 @@ if [[ "$SYSTEM_MODE" -eq 1 || "$INSTALL_SYSTEM_COPY" -eq 1 ]]; then
   make -C "$ROOT/cmd/sys-dbusd-daemon-helper" clean all
   install -d -m 0755 /usr/local/libexec/servicectl
   install -m 4750 -o root -g dbus "$ROOT/cmd/sys-dbusd-daemon-helper/sys-dbusd-daemon-helper" /usr/local/libexec/servicectl/sys-dbusd-daemon-helper
-  install -d -m 0755 /usr/local/lib/servicectl/dbus-activation /etc/dinit.d
+  install -d -m 0755 /usr/local/lib/servicectl/dbus-activation /usr/lib/systemd/system
   printf '%s\n' \
     '<busconfig>' \
     '  <servicehelper>/usr/local/libexec/servicectl/sys-dbusd-daemon-helper</servicehelper>' \
     '</busconfig>' > /usr/local/lib/servicectl/dbus-activation/50-servicectl-activation.conf
   chmod 0644 /usr/local/lib/servicectl/dbus-activation/50-servicectl-activation.conf
-  printf '%s\n' \
-    '# servicectl D-Bus activation coordinator' \
-    'type = process' \
-    'command = /usr/local/bin/sys-dbusd -helper-path /usr/local/libexec/servicectl/sys-dbusd-daemon-helper -admin-path /usr/local/bin/servicectl -servicectl-path /usr/local/bin/servicectl -dinitctl-path /bin/dinitctl' \
-    'restart = true' \
-    'smooth-recovery = true' \
-    'log-type = buffer' > /etc/dinit.d/sys-dbusd
+  install -m 0644 "$ROOT/packaging/sys-dbusd.service" /usr/lib/systemd/system/sys-dbusd.service
+  sed -i \
+    -e 's#/usr/bin/sys-dbusd#/usr/local/bin/sys-dbusd#' \
+    -e 's#/usr/libexec/servicectl/sys-dbusd-daemon-helper#/usr/local/libexec/servicectl/sys-dbusd-daemon-helper#' \
+    -e 's#/usr/bin/servicectl#/usr/local/bin/servicectl#g' \
+    /usr/lib/systemd/system/sys-dbusd.service
+	if command -v dinitctl >/dev/null 2>&1; then
+		dinitctl stop sys-dbusd >/dev/null 2>&1 || true
+		dinitctl unload sys-dbusd >/dev/null 2>&1 || true
+	fi
+	rm -f /etc/dinit.d/sys-dbusd
 	if command -v dinitctl >/dev/null 2>&1; then
 		dinitctl stop sys-cgroupd >/dev/null 2>&1 || true
 		dinitctl unload sys-cgroupd >/dev/null 2>&1 || true

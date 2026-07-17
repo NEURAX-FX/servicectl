@@ -1,6 +1,0 @@
-# servicectl D-Bus activation coordinator
-type = process
-command = /usr/bin/sys-dbusd
-restart = true
-smooth-recovery = true
-log-type = buffer

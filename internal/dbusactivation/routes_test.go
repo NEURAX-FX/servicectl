@@ -31,8 +31,15 @@ func (r fakeUnitResolver) ResolveBusName(name string) ([]ManagedRoute, error) {
 
 func TestSelectRoutePriority(t *testing.T) {
 	resolver := fakeUnitResolver{
-		explicit: map[string]ManagedRoute{"explicit.service": {Unit: "explicit"}},
-		byBus:    map[string][]ManagedRoute{"org.example.Service": {{Unit: "lookup"}}},
+		explicit: map[string]ManagedRoute{
+			"explicit.service": {Unit: "explicit"},
+			"legacy": {
+				Unit:        "legacy",
+				ServiceName: "legacy-dbusd",
+				ControlPath: "/run/managed/legacy-dbusd/control.sock",
+			},
+		},
+		byBus: map[string][]ManagedRoute{"org.example.Service": {{Unit: "lookup"}}},
 	}
 	tests := []struct {
 		name string
@@ -63,6 +70,10 @@ func TestSelectRoutePriority(t *testing.T) {
 			}
 			if got.Kind != RouteManaged || got.Managed.Unit != tt.want {
 				t.Fatalf("route = %#v, want managed %q", got, tt.want)
+			}
+			if tt.name == "legacy servicectl wins over lookup" &&
+				(got.Managed.ServiceName != "legacy-dbusd" || got.Managed.ControlPath != "/run/managed/legacy-dbusd/control.sock") {
+				t.Fatalf("legacy route = %#v, want resolved managed route", got.Managed)
 			}
 		})
 	}

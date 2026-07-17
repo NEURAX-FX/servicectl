@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -119,6 +120,27 @@ func TestDefaultManagedControlPath(t *testing.T) {
 	want := filepath.Join("/run/servicectl/managed", "unit-dbusd", "control.sock")
 	if got := managedControlPath("/run/servicectl/managed", "unit-dbusd"); got != want {
 		t.Fatalf("managedControlPath = %q, want %q", got, want)
+	}
+}
+
+func TestPrepareManagedUnitUsesCurrentServicectlStartAPI(t *testing.T) {
+	directory := t.TempDir()
+	arguments := filepath.Join(directory, "arguments")
+	servicectl := filepath.Join(directory, "servicectl")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" >" + arguments + "\n"
+	if err := os.WriteFile(servicectl, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := prepareManagedUnit(context.Background(), servicectl, "systemd-localed"); err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(arguments)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "start\nsystemd-localed\n" {
+		t.Fatalf("arguments = %q", content)
 	}
 }
 

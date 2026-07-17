@@ -50,6 +50,15 @@ func SelectRoute(definition ServiceDefinition, resolver UnitResolver) (Route, er
 		return Route{Kind: RouteManaged, Managed: normalizeManagedRoute(route)}, nil
 	}
 	if route, ok := LegacyManagedRoute(definition.Argv); ok {
+		if resolver != nil {
+			resolved, err := resolver.ResolveExplicit(route.Unit)
+			if err == nil {
+				return Route{Kind: RouteManaged, Managed: normalizeManagedRoute(resolved)}, nil
+			}
+			if !errors.Is(err, ErrUnitNotFound) {
+				return Route{}, err
+			}
+		}
 		return Route{Kind: RouteManaged, Managed: route}, nil
 	}
 	if resolver != nil {

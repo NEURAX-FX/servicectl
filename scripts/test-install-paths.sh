@@ -25,5 +25,20 @@ grep -Fq '%{_bindir}/servicectl ensure-s6' "$ROOT/packaging/servicectl-stack.spe
 grep -Fq '/run/servicectl/sys-cgroupd' "$ROOT/packaging/servicectl.tmpfiles"
 grep -Fq 'go build -trimpath -buildvcs=false -o _build/bin/sys-cgroupd ./cmd/sys-cgroupd' "$ROOT/packaging/servicectl-stack.spec"
 grep -Fq '%{_bindir}/sys-cgroupd' "$ROOT/packaging/servicectl-stack.spec"
+grep -Fq 'install -Dpm0644 packaging/sys-dbusd.service %{buildroot}%{_unitdir}/sys-dbusd.service' "$ROOT/packaging/servicectl-stack.spec"
+grep -Fq '%{_unitdir}/sys-dbusd.service' "$ROOT/packaging/servicectl-stack.spec"
+grep -Fq 'rm -f %{_sysconfdir}/dinit.d/sys-dbusd' "$ROOT/packaging/servicectl-stack.spec"
+grep -Fq 'install -m 0644 "$ROOT/packaging/sys-dbusd.service" /usr/lib/systemd/system/sys-dbusd.service' "$INSTALL_SCRIPT"
+if grep -Fq '/usr/local/lib/systemd/system/sys-dbusd.service' "$INSTALL_SCRIPT"; then
+	printf '%s\n' 'installer must use the default system unit directory' >&2
+	exit 1
+fi
+grep -Fq 'rm -f /etc/dinit.d/sys-dbusd' "$INSTALL_SCRIPT"
+test ! -e "$ROOT/packaging/sys-dbusd"
+test -e "$ROOT/packaging/sys-dbusd.service"
+if grep -Eq 'install .*dinit\.d/sys-dbusd|%config.*dinit\.d/sys-dbusd' "$ROOT/packaging/servicectl-stack.spec"; then
+	printf '%s\n' 'RPM must not package a dinit sys-dbusd service' >&2
+	exit 1
+fi
 
 printf '%s\n' 'install path checks passed'

@@ -1,0 +1,13 @@
+[Unit]
+Description=servicectl D-Bus activation coordinator
+After=dbus.service
+Requires=dbus.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/sys-dbusd -helper-path /usr/libexec/servicectl/sys-dbusd-daemon-helper -admin-path /usr/bin/servicectl -servicectl-path /usr/bin/servicectl -dinitctl-path /usr/bin/dinitctl
+Restart=on-failure
+RestartSec=1s
+
+[Install]
+WantedBy=multi-user.target
