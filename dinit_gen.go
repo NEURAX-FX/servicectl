@@ -28,14 +28,14 @@ func dinitArg(s string) string {
 }
 
 func managedServiceModeForUnit(unit *Unit, socketUnit *SocketUnit) managedServiceMode {
-	if socketUnit != nil {
-		if socketUnit.Accept {
-			return managedDirect
-		}
-		return managedSocketd
+	if socketUnit != nil && socketUnit.Accept {
+		return managedDirect
 	}
 	if unit != nil && strings.TrimSpace(unit.BusName) != "" {
 		return managedDbusd
+	}
+	if socketUnit != nil {
+		return managedSocketd
 	}
 	if unit != nil && strings.EqualFold(unit.Type, "notify") {
 		return managedNotifyd
@@ -166,6 +166,11 @@ func normalizeTimeoutValue(raw string) string {
 	}
 	if _, err := strconv.Atoi(raw); err == nil {
 		return raw + "s"
+	}
+	if value := strings.TrimSuffix(raw, "min"); value != raw {
+		if _, err := strconv.ParseFloat(value, 64); err == nil {
+			return value + "m"
+		}
 	}
 	return raw
 }
@@ -361,7 +366,7 @@ func (u *Unit) GenerateNotifydDinit(mode managedServiceMode, socketUnit *SocketU
 	if sig := normalizeSignalName(u.KillSignal); sig != "" {
 		args = append(args, "-kill-signal", dinitArg(sig))
 	}
-	if mode == managedSocketd {
+	if mode == managedSocketd || mode == managedDbusd {
 		args = append(args, socketListenArgs(socketUnit)...)
 	}
 	if mode != managedSocketd && mode != managedDbusd {

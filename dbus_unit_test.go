@@ -56,6 +56,15 @@ func TestManagedServiceModeForNotifyUnitWithBusName(t *testing.T) {
 	}
 }
 
+func TestManagedServiceModeForDBusUnitWithSocket(t *testing.T) {
+	unit := &Unit{Name: "systemd-hostnamed", Type: "notify", BusName: "org.freedesktop.hostname1"}
+	socket := &SocketUnit{Name: "systemd-hostnamed", ListenStreams: []string{"/run/systemd/io.systemd.Hostname"}}
+
+	if got := managedServiceModeForUnit(unit, socket); got != managedDbusd {
+		t.Fatalf("managedServiceModeForUnit() = %q, want %q", got, managedDbusd)
+	}
+}
+
 func TestGenerateDbusdDinitUsesBusName(t *testing.T) {
 	oldConfig := config
 	defer func() { config = oldConfig }()
@@ -113,6 +122,36 @@ func TestGenerateDbusdDinitForNotifyUnitWithBusNameUsesDbusd(t *testing.T) {
 	}
 	if strings.Contains(content, "command = /usr/lib/systemd/systemd-localed") {
 		t.Fatalf("Dinit must supervise sys-notifyd rather than the notify backend directly: %q", content)
+	}
+}
+
+func TestGenerateDbusdDinitIncludesSocketActivation(t *testing.T) {
+	oldConfig := config
+	defer func() { config = oldConfig }()
+
+	tempDir := t.TempDir()
+	config = Config{Mode: "system", ManagedRuntimeDir: filepath.Join(tempDir, "managed")}
+	unit := &Unit{Name: "systemd-hostnamed", Type: "notify", BusName: "org.freedesktop.hostname1", ExecStart: []string{"/usr/lib/systemd/systemd-hostnamed"}}
+	socket := &SocketUnit{Name: "systemd-hostnamed", ListenStreams: []string{"/run/systemd/io.systemd.Hostname"}, FDNames: []string{"varlink"}, SocketMode: "0666"}
+
+	content := unit.GenerateNotifydDinit(managedDbusd, socket)
+
+	for _, want := range []string{
+		"-bus-name org.freedesktop.hostname1",
+		"-control-path " + filepath.Join(config.ManagedRuntimeDir, "systemd-hostnamed-dbusd", "control.sock"),
+		"-listen unix:/run/systemd/io.systemd.Hostname",
+		"-fdname varlink",
+		"-socket-mode 0666",
+	} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("generated dbusd service missing %q: %q", want, content)
+		}
+	}
+}
+
+func TestNormalizeTimeoutValueConvertsSystemdMinutes(t *testing.T) {
+	if got := normalizeTimeoutValue("3min"); got != "3m" {
+		t.Fatalf("normalizeTimeoutValue(3min) = %q, want 3m", got)
 	}
 }
 
@@ -223,6 +262,66 @@ func TestRecursiveInstallWritesDBusActivationFile(t *testing.T) {
 	}
 	if strings.Contains(activationText, "SystemdService=") {
 		t.Fatalf("activation file should not delegate back to systemd: %q", activationText)
+	}
+}
+
+func TestRecursiveInstallMigratesDBusSocketUnitToDbusd(t *testing.T) {
+	oldConfig := config
+	oldRunDinitctl := runDinitctlFunc
+	oldIsKnown := isDinitServiceKnownFunc
+	defer func() {
+		config = oldConfig
+		runDinitctlFunc = oldRunDinitctl
+		isDinitServiceKnownFunc = oldIsKnown
+	}()
+
+	tempDir := t.TempDir()
+	config = Config{
+		Mode:              "system",
+		SystemdPaths:      []string{tempDir},
+		DinitServiceDir:   filepath.Join(tempDir, "dinit-service"),
+		DinitGenDir:       filepath.Join(tempDir, "dinit-gen"),
+		ManagedRuntimeDir: filepath.Join(tempDir, "managed"),
+		DBusServiceDir:    filepath.Join(tempDir, "dbus-services"),
+	}
+	serviceText := "[Service]\nType=notify\nBusName=org.freedesktop.hostname1\nExecStart=/usr/lib/systemd/systemd-hostnamed\n"
+	socketText := "[Socket]\nListenStream=/run/systemd/io.systemd.Hostname\nFileDescriptorName=varlink\nSocketMode=0666\n"
+	if err := os.WriteFile(filepath.Join(tempDir, "systemd-hostnamed.service"), []byte(serviceText), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tempDir, "systemd-hostnamed.socket"), []byte(socketText), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(config.DinitServiceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	obsoleteLink := filepath.Join(config.DinitServiceDir, "systemd-hostnamed-socketd")
+	if err := os.Symlink(filepath.Join(config.DinitGenDir, "systemd-hostnamed-socketd"), obsoleteLink); err != nil {
+		t.Fatal(err)
+	}
+	var calls []string
+	runDinitctlFunc = func(args ...string) bool {
+		calls = append(calls, strings.Join(args, " "))
+		return true
+	}
+	isDinitServiceKnownFunc = func(name string) bool { return name == "systemd-hostnamed-socketd" }
+
+	recursiveInstall("systemd-hostnamed", map[string]bool{}, installOptions{})
+
+	generated, err := os.ReadFile(filepath.Join(config.DinitGenDir, "systemd-hostnamed-dbusd"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"-bus-name org.freedesktop.hostname1", "-listen unix:/run/systemd/io.systemd.Hostname"} {
+		if !strings.Contains(string(generated), want) {
+			t.Fatalf("generated dbusd service missing %q: %q", want, generated)
+		}
+	}
+	if !containsExactString(calls, "stop systemd-hostnamed-socketd") || !containsExactString(calls, "unload --ignore-unstarted systemd-hostnamed-socketd") {
+		t.Fatalf("obsolete service cleanup calls = %v", calls)
+	}
+	if _, err := os.Lstat(obsoleteLink); !os.IsNotExist(err) {
+		t.Fatalf("obsolete socketd link still exists or stat failed: %v", err)
 	}
 }
 
