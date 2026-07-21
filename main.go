@@ -1264,7 +1264,7 @@ func ensureUserModeReady() error {
 
 	if err := dinitctlCommand("list").Run(); err == nil {
 		syncUserDinitEnvironment()
-		return nil
+		return migrateGeneratedLoggerDefinitions()
 	}
 	if err := startUserDinitInstance(); err != nil {
 		return err
@@ -1272,7 +1272,7 @@ func ensureUserModeReady() error {
 	for range 20 {
 		if err := dinitctlCommand("list").Run(); err == nil {
 			syncUserDinitEnvironment()
-			return nil
+			return migrateGeneratedLoggerDefinitions()
 		}
 		time.Sleep(100 * time.Millisecond)
 	}

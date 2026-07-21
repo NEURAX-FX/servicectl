@@ -104,6 +104,10 @@ func s6SysCgroupdServiceName() string {
 	return "sys-cgroupd"
 }
 
+func s6SysLogdServiceName() string {
+	return "sys-logd"
+}
+
 func s6SysvisiondSourceDir() string {
 	return filepath.Join(s6SourceRoot(), s6SysvisiondServiceName())
 }
@@ -118,6 +122,10 @@ func s6SysPropertydSourceDir() string {
 
 func s6SysCgroupdSourceDir() string {
 	return filepath.Join(s6SourceRoot(), s6SysCgroupdServiceName())
+}
+
+func s6SysLogdSourceDir() string {
+	return filepath.Join(s6SourceRoot(), s6SysLogdServiceName())
 }
 
 func s6CompiledValidateDir() string {
@@ -194,6 +202,7 @@ func ensureS6Bundle() error {
 	if !userMode() {
 		entries = appendUniqueLinePreserveOrder(entries, s6SysPropertydServiceName())
 		entries = appendUniqueLinePreserveOrder(entries, s6SysCgroupdServiceName())
+		entries = appendUniqueLinePreserveOrder(entries, s6SysLogdServiceName())
 	}
 	entries = appendUniqueLinePreserveOrder(entries, s6ServicectlAPIServiceName())
 	if err := writeLineFile(s6DefaultContentsPath(), entries); err != nil {
@@ -207,6 +216,9 @@ func ensureS6Bundle() error {
 			return err
 		}
 		if err := ensureSysCgroupdSource(); err != nil {
+			return err
+		}
+		if err := ensureSysLogdSource(); err != nil {
 			return err
 		}
 	}
@@ -300,9 +312,36 @@ func ensureSysCgroupdSource() error {
 	return os.WriteFile(filepath.Join(serviceDir, "dependencies"), []byte(s6SysvisiondServiceName()+"\n"), 0644)
 }
 
+func ensureSysLogdSource() error {
+	serviceDir := s6SysLogdSourceDir()
+	if err := os.MkdirAll(serviceDir, 0755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(serviceDir, "type"), []byte("longrun\n"), 0644); err != nil {
+		return err
+	}
+	runLine := strings.Join([]string{
+		logdBinaryPath(),
+		"-system",
+		"-socket", "/run/servicectl/logd",
+		"-ready-fd", "3",
+	}, " ")
+	runScript := strings.Join([]string{"#!/usr/bin/execlineb -P", runLine, ""}, "\n")
+	if err := os.WriteFile(filepath.Join(serviceDir, "run"), []byte(runScript), 0755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(serviceDir, "notification-fd"), []byte("3\n"), 0644); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(serviceDir, "dependencies"), nil, 0644)
+}
+
 func ensureS6CoreServices() error {
 	if userMode() {
 		return fmt.Errorf("ensure-s6 is only available in system mode")
+	}
+	if err := migrateGeneratedLoggerDefinitions(); err != nil {
+		return err
 	}
 	if err := ensureS6Bundle(); err != nil {
 		return err
@@ -334,6 +373,9 @@ func ensureS6CoreServices() error {
 			return err
 		}
 	}
+	if err := liveStartS6(s6SysLogdServiceName()); err != nil {
+		return err
+	}
 	return liveStartS6(s6SysCgroupdServiceName())
 }
 
@@ -341,7 +383,7 @@ func restartUpdatedCoreServices() error {
 	services := []struct {
 		name  string
 		ready bool
-	}{{s6SysPropertydServiceName(), true}, {"servicectl-api", true}}
+	}{{s6SysLogdServiceName(), true}, {s6SysPropertydServiceName(), true}, {"servicectl-api", true}}
 	entries, err := os.ReadDir(s6SourceRoot())
 	if err != nil {
 		return err

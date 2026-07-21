@@ -34,7 +34,10 @@ func (s *spillManager) WriteLine(message string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if err := os.MkdirAll(s.dir, 0755); err != nil {
+	if err := os.MkdirAll(s.dir, 0700); err != nil {
+		return err
+	}
+	if err := os.Chmod(s.dir, 0700); err != nil {
 		return err
 	}
 	line := message + "\n"
@@ -109,7 +112,7 @@ func (s *spillManager) prepareReplayPaths() ([]string, error) {
 
 func (s *spillManager) ensureCurrentLocked(nextWrite int64) error {
 	if s.file == nil {
-		file, err := os.OpenFile(s.pathForIndex(0), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+		file, err := os.OpenFile(s.pathForIndex(0), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 		if err != nil {
 			return err
 		}
@@ -127,7 +130,7 @@ func (s *spillManager) ensureCurrentLocked(nextWrite int64) error {
 	if err := s.rotateLocked(); err != nil {
 		return err
 	}
-	file, err := os.OpenFile(s.pathForIndex(0), os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
+	file, err := os.OpenFile(s.pathForIndex(0), os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
 	if err != nil {
 		return err
 	}

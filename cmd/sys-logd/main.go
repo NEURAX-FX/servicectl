@@ -2,15 +2,18 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"flag"
 	"fmt"
 	"io"
 	"log/syslog"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"servicectl/internal/util"
@@ -27,6 +30,14 @@ const (
 
 type config struct {
 	service           string
+	systemMode        bool
+	workerMode        bool
+	scope             string
+	unit              string
+	loggerService     string
+	socketPath        string
+	journalSocketPath string
+	readyFD           int
 	queueSize         int
 	enqueueTimeout    time.Duration
 	reconnectInterval time.Duration
@@ -43,7 +54,34 @@ type statusReporter struct {
 
 func main() {
 	cfg := parseFlags()
+	if cfg.systemMode {
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer stop()
+		if err := runBroker(ctx, brokerConfig{
+			SocketPath:        cfg.socketPath,
+			JournalSocketPath: cfg.journalSocketPath,
+			ReadyFD:           cfg.readyFD,
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "sys-logd: system broker: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 	identifier := util.JournalIdentifier(cfg.service)
+	var sink messageSink
+	if cfg.workerMode {
+		if _, err := parseWorkerRoute(os.Args); err != nil {
+			fmt.Fprintf(os.Stderr, "sys-logd: invalid worker route: %v\n", err)
+			os.Exit(2)
+		}
+		sink = newFallbackSink(
+			newBrokerSink(cfg.socketPath, brokerPacketDeadline),
+			newSyslogSink(identifier),
+			cfg.reconnectInterval,
+		)
+	} else {
+		sink = newSyslogSink(identifier)
+	}
 	reporter := &statusReporter{service: cfg.service}
 	spill := newSpillManager(cfg.service, cfg.spillDir, cfg.spillMaxBytes, cfg.spillRotations)
 	var spillMode atomic.Bool
@@ -52,23 +90,22 @@ func main() {
 	errCh := make(chan error, 1)
 	go readInput(messages, errCh, cfg, spill, reporter, &spillMode)
 
-	runWriter(messages, errCh, identifier, cfg, spill, reporter, &spillMode)
+	runWriter(messages, errCh, sink, cfg, spill, reporter, &spillMode)
 }
 
-func runWriter(messages <-chan string, errCh <-chan error, identifier string, cfg config, spill *spillManager, reporter *statusReporter, spillMode *atomic.Bool) {
-	var writer *syslog.Writer
-	defer closeWriter(writer)
+func runWriter(messages <-chan string, errCh <-chan error, sink messageSink, cfg config, spill *spillManager, reporter *statusReporter, spillMode *atomic.Bool) {
+	defer sink.Close()
 
 	inputClosed := false
 	for {
 		if spillMode.Load() && len(messages) == 0 {
-			if err := replaySpill(&writer, identifier, cfg, spill, reporter); err == nil {
+			if err := replaySpill(sink, spill, reporter); err == nil {
 				if !spill.HasSpill() {
 					spillMode.Store(false)
 					reporter.exitSpill()
 				}
 			} else {
-				reporter.enterSpill("syslog unavailable: " + err.Error())
+				reporter.enterSpill("log sink unavailable: " + err.Error())
 				time.Sleep(cfg.reconnectInterval)
 			}
 			if inputClosed && len(messages) == 0 && !spillMode.Load() {
@@ -98,9 +135,9 @@ func runWriter(messages <-chan string, errCh <-chan error, identifier string, cf
 				}
 				continue
 			}
-			if err := writeMessage(&writer, identifier, msg); err != nil {
+			if err := writeMessage(sink, msg); err != nil {
 				spillMode.Store(true)
-				reporter.enterSpill("syslog write failed: " + err.Error())
+				reporter.enterSpill("log sink write failed: " + err.Error())
 				if spillErr := spill.WriteLine(msg); spillErr != nil {
 					reporter.spillFailure(spillErr)
 				}
@@ -153,11 +190,11 @@ func routeMessage(messages chan<- string, message string, cfg config, spill *spi
 	}
 }
 
-func replaySpill(writer **syslog.Writer, identifier string, cfg config, spill *spillManager, reporter *statusReporter) error {
+func replaySpill(sink messageSink, spill *spillManager, reporter *statusReporter) error {
 	for spill.HasSpill() {
 		reporter.replayStart()
 		if err := spill.ReplayTo(func(message string) error {
-			return writeMessage(writer, identifier, message)
+			return writeMessage(sink, message)
 		}); err != nil {
 			return err
 		}
@@ -165,37 +202,44 @@ func replaySpill(writer **syslog.Writer, identifier string, cfg config, spill *s
 	return nil
 }
 
-func writeMessage(writer **syslog.Writer, identifier string, message string) error {
+func writeMessage(sink messageSink, message string) error {
 	if strings.TrimSpace(message) == "" {
 		return nil
 	}
-	if err := ensureWriter(writer, identifier); err != nil {
-		return err
+	return sink.WriteMessage(message)
+}
+
+type syslogSink struct {
+	identifier string
+	writer     *syslog.Writer
+}
+
+func newSyslogSink(identifier string) *syslogSink {
+	return &syslogSink{identifier: identifier}
+}
+
+func (sink *syslogSink) WriteMessage(message string) error {
+	if sink.writer == nil {
+		writer, err := syslog.New(syslog.LOG_INFO|syslog.LOG_DAEMON, sink.identifier)
+		if err != nil {
+			return err
+		}
+		sink.writer = writer
 	}
-	if err := (*writer).Info(message); err != nil {
-		closeWriter(*writer)
-		*writer = nil
+	if err := sink.writer.Info(message); err != nil {
+		_ = sink.Close()
 		return err
 	}
 	return nil
 }
 
-func ensureWriter(writer **syslog.Writer, identifier string) error {
-	if *writer != nil {
+func (sink *syslogSink) Close() error {
+	if sink.writer == nil {
 		return nil
 	}
-	w, err := syslog.New(syslog.LOG_INFO|syslog.LOG_DAEMON, identifier)
-	if err != nil {
-		return err
-	}
-	*writer = w
-	return nil
-}
-
-func closeWriter(writer *syslog.Writer) {
-	if writer != nil {
-		_ = writer.Close()
-	}
+	err := sink.writer.Close()
+	sink.writer = nil
+	return err
 }
 
 func (r *statusReporter) enterSpill(reason string) {
@@ -234,11 +278,26 @@ func (r *statusReporter) spillFailure(err error) {
 func parseFlags() config {
 	var cfg config
 	flag.StringVar(&cfg.service, "service", "service", "logical service name for journal identifier")
+	flag.BoolVar(&cfg.systemMode, "system", false, "run the system log broker")
+	flag.BoolVar(&cfg.workerMode, "worker", false, "run a per-unit broker worker")
+	flag.StringVar(&cfg.scope, "scope", "", "worker unit scope")
+	flag.StringVar(&cfg.unit, "unit", "", "worker logical unit")
+	flag.StringVar(&cfg.loggerService, "logger-service", "", "worker Dinit logger service")
+	flag.StringVar(&cfg.socketPath, "socket", defaultBrokerSocketPath, "system broker socket")
+	flag.StringVar(&cfg.journalSocketPath, "journal-socket", defaultJournalSocketPath, "journald native socket")
+	flag.IntVar(&cfg.readyFD, "ready-fd", 0, "readiness notification fd")
+	flag.StringVar(&cfg.spillDir, "spill-dir", "", "spill directory")
 	flag.Parse()
+	if cfg.systemMode && cfg.workerMode {
+		fmt.Fprintln(os.Stderr, "sys-logd: --system and --worker are mutually exclusive")
+		os.Exit(2)
+	}
 	cfg.queueSize = maxInt(1, envInt("SERVICECTL_LOGD_QUEUE_SIZE", defaultQueueSize))
 	cfg.enqueueTimeout = envDurationMillis("SERVICECTL_LOGD_ENQUEUE_TIMEOUT_MS", defaultEnqueueTimeout)
 	cfg.reconnectInterval = envDurationMillis("SERVICECTL_LOGD_RECONNECT_INTERVAL_MS", defaultReconnectInterval)
-	cfg.spillDir = envString("SERVICECTL_LOGSPILL_DIR", defaultSpillDir)
+	if strings.TrimSpace(cfg.spillDir) == "" {
+		cfg.spillDir = envString("SERVICECTL_LOGSPILL_DIR", defaultSpillDir)
+	}
 	cfg.spillMaxBytes = maxInt64(1024, envInt64("SERVICECTL_LOGD_SPILL_MAX_BYTES", defaultSpillMaxBytes))
 	cfg.spillRotations = maxInt(1, envInt("SERVICECTL_LOGD_SPILL_ROTATIONS", defaultSpillRotations))
 	return cfg

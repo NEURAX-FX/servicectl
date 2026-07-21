@@ -104,14 +104,68 @@ func loggerServiceName(serviceName string) string {
 	return serviceName + "-log"
 }
 
-func generateLoggerDinit(serviceName string, logicalName string) string {
+func generateLoggerDinit(serviceName string, logicalName string, unit *Unit) string {
 	var sb strings.Builder
+	loggerName := loggerServiceName(serviceName)
+	unitName := strings.TrimSuffix(logicalName, ".service") + ".service"
+	args := []string{
+		logdBinaryPath(),
+		"-worker",
+		"-scope", config.Mode,
+		"-unit", unitName,
+		"-logger-service", loggerName,
+		"-service", strings.TrimSuffix(logicalName, ".service"),
+		"-spill-dir", loggerSpillDir(loggerName),
+	}
 	sb.WriteString(fmt.Sprintf("# Log consumer for %s\n", serviceName))
 	sb.WriteString("type = process\n")
 	sb.WriteString(fmt.Sprintf("consumer-of = %s\n", serviceName))
-	sb.WriteString(fmt.Sprintf("command = %s -service %s\n", dinitArg(logdBinaryPath()), dinitArg(strings.TrimSuffix(logicalName, ".service"))))
+	quoted := make([]string, 0, len(args))
+	for _, arg := range args {
+		quoted = append(quoted, dinitArg(arg))
+	}
+	sb.WriteString("command = " + strings.Join(quoted, " ") + "\n")
+	if !userMode() && unit != nil && strings.TrimSpace(unit.User) != "" {
+		sb.WriteString("run-as = " + dinitArg(strings.TrimSpace(unit.User)) + "\n")
+	}
 	sb.WriteString("restart = false\n")
 	return sb.String()
+}
+
+func loggerSpillDir(loggerName string) string {
+	base := strings.TrimSpace(config.ManagedRuntimeDir)
+	if base == "" {
+		if userMode() {
+			base = filepath.Join(runtimeDir(), "servicectl", "managed")
+		} else {
+			base = "/run/servicectl/managed"
+		}
+	}
+	spillBase := filepath.Join(filepath.Dir(base), "logspill")
+	if !userMode() {
+		spillBase = filepath.Join(spillBase, "system")
+	}
+	return filepath.Join(spillBase, loggerName)
+}
+
+func ensureLoggerSpillDir(path string, unit *Unit) error {
+	if err := os.MkdirAll(path, 0700); err != nil {
+		return fmt.Errorf("create logger spill directory: %w", err)
+	}
+	if err := os.Chmod(path, 0700); err != nil {
+		return fmt.Errorf("chmod logger spill directory: %w", err)
+	}
+	if !config.IsRoot || unit == nil || (strings.TrimSpace(unit.User) == "" && strings.TrimSpace(unit.Group) == "") {
+		return nil
+	}
+	uid, gid, err := lookupOwnership(unit.User, unit.Group)
+	if err != nil {
+		return err
+	}
+	if err := os.Chown(path, uid, gid); err != nil {
+		return fmt.Errorf("chown logger spill directory: %w", err)
+	}
+	return nil
 }
 
 func normalizeSocketAddress(value string) string {
@@ -449,6 +503,82 @@ func installGeneratedService(serviceName string, content []byte, opts installOpt
 	return true
 }
 
+func migrateGeneratedLoggerDefinitions() error {
+	entries, err := os.ReadDir(config.DinitGenDir)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), "-log") {
+			continue
+		}
+		path := filepath.Join(config.DinitGenDir, entry.Name())
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if strings.Contains(string(content), " -worker ") {
+			continue
+		}
+		serviceName, logicalName, ok := parseLegacyLoggerDefinition(string(content))
+		if !ok || loggerServiceName(serviceName) != entry.Name() {
+			continue
+		}
+		unit, err := parseSystemdUnit(logicalName)
+		if err != nil {
+			continue
+		}
+		spillDir := loggerSpillDir(entry.Name())
+		if err := ensureLoggerSpillDir(spillDir, unit); err != nil {
+			return err
+		}
+		if !installGeneratedService(entry.Name(), []byte(generateLoggerDinit(serviceName, logicalName, unit)), installOptions{}) {
+			return fmt.Errorf("migrate logger definition %s", entry.Name())
+		}
+	}
+	return nil
+}
+
+func parseLegacyLoggerDefinition(content string) (serviceName, logicalName string, ok bool) {
+	var command string
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		if value, found := strings.CutPrefix(line, "consumer-of ="); found {
+			serviceName = strings.TrimSpace(value)
+		}
+		if value, found := strings.CutPrefix(line, "command ="); found {
+			command = strings.TrimSpace(value)
+		}
+	}
+	if !validGeneratedServiceName(serviceName) || command == "" {
+		return "", "", false
+	}
+	argv, err := splitSystemdCommandLine(command)
+	if err != nil || len(argv) == 0 || filepath.Base(argv[0]) != "sys-logd" {
+		return "", "", false
+	}
+	for index := 1; index+1 < len(argv); index++ {
+		if argv[index] == "-service" || argv[index] == "--service" {
+			logicalName = strings.TrimSpace(argv[index+1])
+			break
+		}
+	}
+	if logicalName == "" {
+		return "", "", false
+	}
+	return serviceName, logicalName, true
+}
+
+func validGeneratedServiceName(name string) bool {
+	if name == "" || name == "." || name == ".." || filepath.Base(name) != name {
+		return false
+	}
+	return !strings.ContainsAny(name, "\x00\r\n\t ")
+}
+
 func obsoleteManagedServiceNames(unitName string, currentMode managedServiceMode) []string {
 	modes := []managedServiceMode{managedNotifyd, managedSocketd, managedDbusd}
 	result := make([]string, 0, len(modes))
@@ -537,7 +667,12 @@ func recursiveInstall(unitName string, visited map[string]bool, opts installOpti
 		return
 	}
 	loggerName := loggerServiceName(serviceName)
-	if !installGeneratedService(loggerName, []byte(generateLoggerDinit(serviceName, cleanName)), opts) {
+	spillDir := loggerSpillDir(loggerName)
+	if err := ensureLoggerSpillDir(spillDir, unit); err != nil {
+		fmt.Printf("Error creating logger spill dir for %s: %v\n", cleanName, err)
+		return
+	}
+	if !installGeneratedService(loggerName, []byte(generateLoggerDinit(serviceName, cleanName, unit)), opts) {
 		return
 	}
 	if knownToDinit && !isDinitServiceKnown(serviceName) {

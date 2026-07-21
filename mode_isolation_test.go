@@ -389,6 +389,9 @@ func TestEnsureS6BundleUsesOnePlaneInUserMode(t *testing.T) {
 	if _, err := os.Stat(s6SysCgroupdSourceDir()); !os.IsNotExist(err) {
 		t.Fatalf("user mode created sys-cgroupd source: %v", err)
 	}
+	if _, err := os.Stat(s6SysLogdSourceDir()); !os.IsNotExist(err) {
+		t.Fatalf("user mode created sys-logd source: %v", err)
+	}
 }
 
 func TestEnsureS6BundleOrdersSystemPropertyAndAPIReadiness(t *testing.T) {
@@ -400,6 +403,7 @@ func TestEnsureS6BundleOrdersSystemPropertyAndAPIReadiness(t *testing.T) {
 		testS6PathsOverride = previousPaths
 	})
 	config = buildConfig(false)
+	useTempDinitPaths(&config, tmp)
 	testS6PathsOverride = &s6PlanePaths{
 		SourceRoot:      filepath.Join(tmp, "s6", "rc"),
 		CompiledDir:     filepath.Join(tmp, "run", "s6", "compiled.servicectl"),
@@ -445,6 +449,7 @@ func TestEnsureS6BundleIncludesSystemCgroupd(t *testing.T) {
 		testS6PathsOverride = previousPaths
 	})
 	config = buildConfig(false)
+	useTempDinitPaths(&config, tmp)
 	testS6PathsOverride = &s6PlanePaths{
 		SourceRoot:      filepath.Join(tmp, "s6", "rc"),
 		CompiledDir:     filepath.Join(tmp, "run", "s6", "compiled.servicectl"),
@@ -479,6 +484,52 @@ func TestEnsureS6BundleIncludesSystemCgroupd(t *testing.T) {
 	}
 }
 
+func TestEnsureS6BundleIncludesSystemLogd(t *testing.T) {
+	tmp := t.TempDir()
+	previousConfig := config
+	previousPaths := testS6PathsOverride
+	t.Cleanup(func() {
+		config = previousConfig
+		testS6PathsOverride = previousPaths
+	})
+	config = buildConfig(false)
+	useTempDinitPaths(&config, tmp)
+	testS6PathsOverride = &s6PlanePaths{
+		SourceRoot:      filepath.Join(tmp, "s6", "rc"),
+		CompiledDir:     filepath.Join(tmp, "run", "s6", "compiled.servicectl"),
+		LiveDir:         filepath.Join(tmp, "run", "s6", "state"),
+		BundleDir:       filepath.Join(tmp, "s6", "rc", s6BundleName()),
+		BundleContents:  filepath.Join(tmp, "s6", "rc", s6BundleName(), "contents"),
+		DefaultContents: filepath.Join(tmp, "s6", "rc", "default", "contents"),
+	}
+	if err := ensureS6Bundle(); err != nil {
+		t.Fatal(err)
+	}
+	run, err := os.ReadFile(filepath.Join(s6SysLogdSourceDir(), "run"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"sys-logd", "-system", "-socket /run/servicectl/logd", "-ready-fd 3"} {
+		if !strings.Contains(string(run), want) {
+			t.Fatalf("sys-logd run script missing %q: %q", want, run)
+		}
+	}
+	readyFD, err := os.ReadFile(filepath.Join(s6SysLogdSourceDir(), "notification-fd"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(readyFD) != "3\n" {
+		t.Fatalf("sys-logd notification fd = %q", readyFD)
+	}
+	defaultContents, err := os.ReadFile(s6DefaultContentsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsString(uniqueLinesPreserveOrder(string(defaultContents)), s6SysLogdServiceName()) {
+		t.Fatalf("default contents = %q", defaultContents)
+	}
+}
+
 func TestEnsureS6CoreServicesOnlyCompilesWithoutLiveGraph(t *testing.T) {
 	tmp := t.TempDir()
 	previousConfig := config
@@ -492,6 +543,7 @@ func TestEnsureS6CoreServicesOnlyCompilesWithoutLiveGraph(t *testing.T) {
 		commandOutputFunc = previousCommandOutput
 	})
 	config = buildConfig(false)
+	useTempDinitPaths(&config, tmp)
 	testS6PathsOverride = &s6PlanePaths{
 		SourceRoot:      filepath.Join(tmp, "s6", "rc"),
 		CompiledDir:     filepath.Join(tmp, "run", "s6", "compiled.servicectl"),
@@ -528,6 +580,7 @@ func TestEnsureS6CoreServicesBootstrapsMissingSourceRoot(t *testing.T) {
 		commandOutputFunc = previousCommandOutput
 	})
 	config = buildConfig(false)
+	useTempDinitPaths(&config, tmp)
 	testS6PathsOverride = &s6PlanePaths{
 		SourceRoot:      filepath.Join(tmp, "missing", "s6", "rc"),
 		CompiledDir:     filepath.Join(tmp, "run", "s6", "compiled.servicectl"),
@@ -562,6 +615,7 @@ func TestEnsureS6CoreServicesUpdatesThenStartsCgroupd(t *testing.T) {
 		commandOutputFunc = previousCommandOutput
 	})
 	config = buildConfig(false)
+	useTempDinitPaths(&config, tmp)
 	testS6PathsOverride = &s6PlanePaths{
 		SourceRoot:      filepath.Join(tmp, "s6", "rc"),
 		CompiledDir:     filepath.Join(tmp, "run", "s6", "compiled.servicectl"),
@@ -574,7 +628,7 @@ func TestEnsureS6CoreServicesUpdatesThenStartsCgroupd(t *testing.T) {
 		t.Fatal(err)
 	}
 	s6AvailableFunc = func() bool { return true }
-	commands := make([]string, 0, 3)
+	commands := make([]string, 0, 4)
 	commandOutputFunc = func(name string, args ...string) (string, int, error) {
 		commands = append(commands, strings.Join(append([]string{name}, args...), " "))
 		return "", 0, nil
@@ -583,14 +637,17 @@ func TestEnsureS6CoreServicesUpdatesThenStartsCgroupd(t *testing.T) {
 	if err := ensureS6CoreServices(); err != nil {
 		t.Fatal(err)
 	}
-	if len(commands) != 3 {
+	if len(commands) != 4 {
 		t.Fatalf("commands = %#v", commands)
 	}
 	if !strings.Contains(commands[0], "s6-rc-compile") || !strings.Contains(commands[1], "s6-rc-update") {
 		t.Fatalf("commands = %#v", commands)
 	}
-	if !strings.Contains(commands[2], "s6-rc") || !strings.HasSuffix(commands[2], "change sys-cgroupd") {
-		t.Fatalf("start command = %q", commands[2])
+	if !strings.Contains(commands[2], "s6-rc") || !strings.HasSuffix(commands[2], "change sys-logd") {
+		t.Fatalf("logd start command = %q", commands[2])
+	}
+	if !strings.Contains(commands[3], "s6-rc") || !strings.HasSuffix(commands[3], "change sys-cgroupd") {
+		t.Fatalf("cgroupd start command = %q", commands[3])
 	}
 }
 
@@ -668,6 +725,7 @@ func TestEnsureS6CoreServicesMigratesExistingUserAPIInUnifiedGraph(t *testing.T)
 		commandOutputFunc = previousCommandOutput
 	})
 	config = buildConfig(false)
+	useTempDinitPaths(&config, tmp)
 	testS6PathsOverride = &s6PlanePaths{
 		SourceRoot:      filepath.Join(tmp, "s6", "rc"),
 		CompiledDir:     filepath.Join(tmp, "run", "s6", "compiled.servicectl"),
@@ -730,6 +788,7 @@ func TestEnsureS6CoreServicesMigratesExistingUserOrchestrdDependencies(t *testin
 		commandOutputFunc = previousCommandOutput
 	})
 	config = buildConfig(false)
+	useTempDinitPaths(&config, tmp)
 	testS6PathsOverride = &s6PlanePaths{
 		SourceRoot:      filepath.Join(tmp, "s6", "rc"),
 		CompiledDir:     filepath.Join(tmp, "run", "s6", "compiled.servicectl"),
@@ -925,4 +984,10 @@ func TestEnabledStandaloneServicesFiltersCurrentMode(t *testing.T) {
 	if got := enabledStandaloneServicesFromS6Bundle(); len(got) != 1 || got[0] != "user-demo.service" {
 		t.Fatalf("user services = %#v", got)
 	}
+}
+
+func useTempDinitPaths(cfg *Config, root string) {
+	cfg.DinitGenDir = filepath.Join(root, "dinit", "generated")
+	cfg.DinitServiceDir = filepath.Join(root, "dinit", "services")
+	cfg.ManagedRuntimeDir = filepath.Join(root, "runtime", "managed")
 }
