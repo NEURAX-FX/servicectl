@@ -8,12 +8,14 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"reflect"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"servicectl/internal/cgrouptrack"
 	"servicectl/internal/statusview"
 	"servicectl/internal/visionapi"
 )
@@ -224,10 +226,11 @@ func TestBuildSystemdPropertiesIncludesAvailableMetadata(t *testing.T) {
 		After:            []string{"network.target", "cache.service"},
 	}
 	snapshot := visionapi.UnitSnapshot{
-		Name:    "demo",
-		State:   "STARTED",
-		MainPID: "4242",
-		Status:  "ready",
+		Name:       "demo",
+		State:      "STARTED",
+		MainPID:    "4242",
+		Status:     "ready",
+		CgroupPath: "/servicectl.slice/system/demo",
 	}
 	lists := visionapi.UnitListsResponse{EnabledUnits: []string{"demo.service"}}
 
@@ -236,6 +239,7 @@ func TestBuildSystemdPropertiesIncludesAvailableMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertSystemdPropertyJSON(t, properties, "org.freedesktop.systemd1.Unit", "FragmentPath", "s", `"/etc/systemd/system/demo.service"`)
+	assertSystemdPropertyJSON(t, properties, "org.freedesktop.systemd1.Unit", "ControlGroup", "s", `"/servicectl.slice/system/demo"`)
 	assertSystemdPropertyJSON(t, properties, "org.freedesktop.systemd1.Unit", "UnitFileState", "s", `"enabled"`)
 	assertSystemdPropertyJSON(t, properties, "org.freedesktop.systemd1.Unit", "Requires", "as", `["network.target"]`)
 	assertSystemdPropertyJSON(t, properties, "org.freedesktop.systemd1.Unit", "Wants", "as", `["cache.service"]`)
@@ -272,6 +276,67 @@ func TestBuildSystemdPropertiesOmitsUnavailableMetadata(t *testing.T) {
 	}
 	assertSystemdPropertyJSON(t, properties, "org.freedesktop.systemd1.Unit", "FragmentPath", "s", `"/etc/systemd/system/demo.service"`)
 	assertSystemdPropertyJSON(t, properties, "org.freedesktop.systemd1.Unit", "UnitFileState", "s", `"disabled"`)
+	if findSystemdProperty(properties, "org.freedesktop.systemd1.Unit", "ControlGroup") != nil {
+		t.Fatalf("unavailable ControlGroup was published: %#v", properties)
+	}
+}
+
+func TestSystemdControlGroupPath(t *testing.T) {
+	tests := []struct {
+		path string
+		want string
+		ok   bool
+	}{
+		{path: "/sys/fs/cgroup/servicectl.slice/system/demo", want: "/servicectl.slice/system/demo", ok: true},
+		{path: "/sys/fs/cgroup", want: "/", ok: true},
+		{path: "/sys/fs/cgroup/servicectl.slice/../system/demo", want: "/system/demo", ok: true},
+		{path: "/tmp/demo"},
+		{path: "relative/demo"},
+		{path: ""},
+	}
+	for _, test := range tests {
+		got, ok := systemdControlGroupPath(test.path)
+		if got != test.want || ok != test.ok {
+			t.Fatalf("systemdControlGroupPath(%q) = %q, %v; want %q, %v", test.path, got, ok, test.want, test.ok)
+		}
+	}
+}
+
+func TestResolveUnitControlGroup(t *testing.T) {
+	cfg := Config{Mode: visionapi.ModeSystem}
+	calls := 0
+	lookup := func(_ context.Context, got Config, unit string) (cgrouptrack.UnitStatus, error) {
+		calls++
+		if got.Mode != visionapi.ModeSystem || unit != "demo.service" {
+			t.Fatalf("lookup input = mode %q unit %q", got.Mode, unit)
+		}
+		return cgrouptrack.UnitStatus{Path: "/sys/fs/cgroup/servicectl.slice/system/demo"}, nil
+	}
+	got := resolveUnitControlGroup(context.Background(), cfg, "demo.service", lookup)
+	if got != "/servicectl.slice/system/demo" || calls != 1 {
+		t.Fatalf("control group = %q, calls = %d", got, calls)
+	}
+}
+
+func TestResolveUnitControlGroupOmitsUnavailablePaths(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		status cgrouptrack.UnitStatus
+		err    error
+	}{
+		{name: "untracked", err: os.ErrNotExist},
+		{name: "daemon unavailable", err: errors.New("unavailable")},
+		{name: "outside root", status: cgrouptrack.UnitStatus{Path: "/tmp/demo"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			lookup := func(context.Context, Config, string) (cgrouptrack.UnitStatus, error) {
+				return test.status, test.err
+			}
+			if got := resolveUnitControlGroup(context.Background(), Config{Mode: visionapi.ModeSystem}, "demo.service", lookup); got != "" {
+				t.Fatalf("control group = %q", got)
+			}
+		})
+	}
 }
 
 func assertSystemdPropertyJSON(t *testing.T, properties []visionapi.SystemdProperty, interfaceName, name, signature, wantJSON string) {

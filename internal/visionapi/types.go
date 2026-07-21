@@ -200,6 +200,7 @@ type UnitSnapshot struct {
 	ProcessID        string `json:"process_id"`
 	ManagerPID       string `json:"manager_pid"`
 	MainPID          string `json:"main_pid"`
+	CgroupPath       string `json:"cgroup_path,omitempty"`
 	Phase            string `json:"phase"`
 	ChildState       string `json:"child_state"`
 	Status           string `json:"status"`

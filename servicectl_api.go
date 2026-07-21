@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -19,6 +20,7 @@ import (
 	"time"
 	"unicode"
 
+	"servicectl/internal/cgrouptrack"
 	"servicectl/internal/statusview"
 	"servicectl/internal/util"
 	"servicectl/internal/visionapi"
@@ -65,6 +67,10 @@ type servicectlEventHub struct {
 }
 
 var unitSnapshotConfigMu sync.Mutex
+
+const unitDetailCgroupTimeout = 2 * time.Second
+
+type unitCgroupLookup func(context.Context, Config, string) (cgrouptrack.UnitStatus, error)
 
 func newServicectlEventHub() *servicectlEventHub {
 	return &servicectlEventHub{subs: make(map[int]eventSubscriber)}
@@ -206,25 +212,78 @@ func buildUnitSnapshotFromParsed(cfg Config, unitName string, unit *Unit, socket
 	}
 }
 
-func buildUnitDetailResponse(cfg Config, unitName string, lists visionapi.UnitListsResponse) (visionapi.UnitDetailResponse, error) {
-	unitSnapshotConfigMu.Lock()
-	defer unitSnapshotConfigMu.Unlock()
-	previous := config
-	config = cfg
-	defer func() { config = previous }()
+func systemdControlGroupPath(path string) (string, bool) {
+	const cgroupRoot = "/sys/fs/cgroup"
 
-	unit, err := parseSystemdUnit(unitName)
+	clean := filepath.Clean(strings.TrimSpace(path))
+	if !filepath.IsAbs(clean) {
+		return "", false
+	}
+	relative, err := filepath.Rel(cgroupRoot, clean)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	if relative == "." {
+		return "/", true
+	}
+	return "/" + filepath.ToSlash(relative), true
+}
+
+func queryUnitDetailCgroup(ctx context.Context, cfg Config, unit string) (cgrouptrack.UnitStatus, error) {
+	uid := uint32(0)
+	if strings.EqualFold(cfg.Mode, visionapi.ModeUser) {
+		uid = uint32(os.Geteuid())
+	}
+	return queryStatusCgroupUnit(ctx, cgroupdSocketPath, cfg.Mode, uid, unit, doCgroupRequest)
+}
+
+func resolveUnitControlGroup(ctx context.Context, cfg Config, unit string, lookup unitCgroupLookup) string {
+	if lookup == nil {
+		return ""
+	}
+	status, err := lookup(ctx, cfg, unit)
 	if err != nil {
-		if isStatusUnitNotFoundError(err) {
-			return visionapi.UnitDetailResponse{}, fmt.Errorf("%w: %v", errUnitDetailNotFound, err)
+		return ""
+	}
+	path, ok := systemdControlGroupPath(status.Path)
+	if !ok {
+		return ""
+	}
+	return path
+}
+
+func buildUnitDetailResponse(cfg Config, unitName string, lists visionapi.UnitListsResponse) (visionapi.UnitDetailResponse, error) {
+	return buildUnitDetailResponseWithCgroup(cfg, unitName, lists, queryUnitDetailCgroup)
+}
+
+func buildUnitDetailResponseWithCgroup(cfg Config, unitName string, lists visionapi.UnitListsResponse, lookup unitCgroupLookup) (visionapi.UnitDetailResponse, error) {
+	unit, snapshot, err := func() (*Unit, visionapi.UnitSnapshot, error) {
+		unitSnapshotConfigMu.Lock()
+		defer unitSnapshotConfigMu.Unlock()
+		previous := config
+		config = cfg
+		defer func() { config = previous }()
+
+		unit, err := parseSystemdUnit(unitName)
+		if err != nil {
+			if isStatusUnitNotFoundError(err) {
+				return nil, visionapi.UnitSnapshot{}, fmt.Errorf("%w: %v", errUnitDetailNotFound, err)
+			}
+			return nil, visionapi.UnitSnapshot{}, err
 		}
+		socketUnit, err := parseOptionalSocketUnit(unit.Name)
+		if err != nil {
+			return nil, visionapi.UnitSnapshot{}, err
+		}
+		return unit, buildUnitSnapshotFromParsed(cfg, unitName, unit, socketUnit), nil
+	}()
+	if err != nil {
 		return visionapi.UnitDetailResponse{}, err
 	}
-	socketUnit, socketErr := parseOptionalSocketUnit(unit.Name)
-	if socketErr != nil {
-		return visionapi.UnitDetailResponse{}, socketErr
-	}
-	snapshot := buildUnitSnapshotFromParsed(cfg, unitName, unit, socketUnit)
+
+	ctx, cancel := context.WithTimeout(context.Background(), unitDetailCgroupTimeout)
+	defer cancel()
+	snapshot.CgroupPath = resolveUnitControlGroup(ctx, cfg, unitName, lookup)
 	properties, err := buildSystemdProperties(unit, snapshot, lists)
 	if err != nil {
 		return visionapi.UnitDetailResponse{}, err
@@ -320,7 +379,7 @@ func buildSystemdProperties(unit *Unit, snapshot visionapi.UnitSnapshot, lists v
 		serviceInterface = "org.freedesktop.systemd1.Service"
 	)
 
-	properties := make([]visionapi.SystemdProperty, 0, 16)
+	properties := make([]visionapi.SystemdProperty, 0, 17)
 	appendProperty := func(interfaceName, name, signature string, value any) error {
 		var err error
 		properties, err = appendSystemdProperty(properties, interfaceName, name, signature, value)
@@ -328,6 +387,11 @@ func buildSystemdProperties(unit *Unit, snapshot visionapi.UnitSnapshot, lists v
 	}
 	if unit.SourcePath != "" {
 		if err := appendProperty(unitInterface, "FragmentPath", "s", unit.SourcePath); err != nil {
+			return nil, err
+		}
+	}
+	if snapshot.CgroupPath != "" {
+		if err := appendProperty(unitInterface, "ControlGroup", "s", snapshot.CgroupPath); err != nil {
 			return nil, err
 		}
 	}
