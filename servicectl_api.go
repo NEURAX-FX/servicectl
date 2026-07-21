@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -16,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"servicectl/internal/statusview"
 	"servicectl/internal/util"
@@ -38,11 +40,13 @@ type servicectlPlaneServer struct {
 	enabledUnits           func() []string
 	discoverUnits          func(Config) []string
 	collectSnapshots       func(Config, []string) visionapi.UnitsResponse
+	buildUnitDetail        func(Config, string, visionapi.UnitListsResponse) (visionapi.UnitDetailResponse, error)
 	canonicalizeStatusUnit func(Config, string) (string, error)
 	buildStatusManifest    func(Config, string, visionapi.UnitListsResponse, string) (visionapi.StatusParticipationManifest, error)
 }
 
 var errStatusManifestUnitNotFound = errors.New("status manifest unit not found")
+var errUnitDetailNotFound = errors.New("unit detail not found")
 
 type statusManifestAPIError struct {
 	Error statusManifestAPIErrorDetail `json:"error"`
@@ -148,6 +152,10 @@ func buildUnitSnapshot(cfg Config, unitName string) (visionapi.UnitSnapshot, err
 		return visionapi.UnitSnapshot{}, err
 	}
 	socketUnit, _ := parseOptionalSocketUnit(unitName)
+	return buildUnitSnapshotFromParsed(cfg, unitName, unit, socketUnit), nil
+}
+
+func buildUnitSnapshotFromParsed(cfg Config, unitName string, unit *Unit, socketUnit *SocketUnit) visionapi.UnitSnapshot {
 	managementMode := managedServiceModeForUnit(unit, socketUnit)
 	dinitName := backendServiceNameForUnit(unitName)
 	loggerName := loggerServiceName(dinitName)
@@ -195,7 +203,220 @@ func buildUnitSnapshot(cfg Config, unitName string) (visionapi.UnitSnapshot, err
 		BusOwner:     mapValue(runtimeState, "bus_owner"),
 		StateFile:    managedStateFilePath(unitName, unit, socketUnit),
 		UpdatedAt:    time.Now().UTC().Format(time.RFC3339Nano),
+	}
+}
+
+func buildUnitDetailResponse(cfg Config, unitName string, lists visionapi.UnitListsResponse) (visionapi.UnitDetailResponse, error) {
+	unitSnapshotConfigMu.Lock()
+	defer unitSnapshotConfigMu.Unlock()
+	previous := config
+	config = cfg
+	defer func() { config = previous }()
+
+	unit, err := parseSystemdUnit(unitName)
+	if err != nil {
+		if isStatusUnitNotFoundError(err) {
+			return visionapi.UnitDetailResponse{}, fmt.Errorf("%w: %v", errUnitDetailNotFound, err)
+		}
+		return visionapi.UnitDetailResponse{}, err
+	}
+	socketUnit, socketErr := parseOptionalSocketUnit(unit.Name)
+	if socketErr != nil {
+		return visionapi.UnitDetailResponse{}, socketErr
+	}
+	snapshot := buildUnitSnapshotFromParsed(cfg, unitName, unit, socketUnit)
+	properties, err := buildSystemdProperties(unit, snapshot, lists)
+	if err != nil {
+		return visionapi.UnitDetailResponse{}, err
+	}
+	return visionapi.UnitDetailResponse{Unit: snapshot, SystemdProperties: properties}, nil
+}
+
+func systemdProperty(interfaceName, name, signature string, value any) (visionapi.SystemdProperty, error) {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return visionapi.SystemdProperty{}, err
+	}
+	return visionapi.SystemdProperty{
+		Interface: interfaceName,
+		Name:      name,
+		Signature: signature,
+		Value:     encoded,
 	}, nil
+}
+
+func appendSystemdProperty(properties []visionapi.SystemdProperty, interfaceName, name, signature string, value any) ([]visionapi.SystemdProperty, error) {
+	property, err := systemdProperty(interfaceName, name, signature, value)
+	if err != nil {
+		return nil, err
+	}
+	return append(properties, property), nil
+}
+
+func splitSystemdCommandLine(command string) ([]string, error) {
+	var result []string
+	var current strings.Builder
+	var quote byte
+	escaped := false
+	hasToken := false
+	flush := func() {
+		if !hasToken {
+			return
+		}
+		result = append(result, current.String())
+		current.Reset()
+		hasToken = false
+	}
+
+	for i := 0; i < len(command); i++ {
+		c := command[i]
+		if escaped {
+			current.WriteByte(c)
+			hasToken = true
+			escaped = false
+			continue
+		}
+		if c == '\\' {
+			escaped = true
+			hasToken = true
+			continue
+		}
+		if quote != 0 {
+			if c == quote {
+				quote = 0
+			} else {
+				current.WriteByte(c)
+			}
+			hasToken = true
+			continue
+		}
+		switch c {
+		case '\'', '"':
+			quote = c
+			hasToken = true
+		case ' ', '\t', '\n', '\r':
+			flush()
+		default:
+			current.WriteByte(c)
+			hasToken = true
+		}
+	}
+	if escaped {
+		return nil, errors.New("trailing escape in ExecStart")
+	}
+	if quote != 0 {
+		return nil, errors.New("unterminated quote in ExecStart")
+	}
+	flush()
+	if len(result) == 0 {
+		return nil, errors.New("empty ExecStart")
+	}
+	return result, nil
+}
+
+func buildSystemdProperties(unit *Unit, snapshot visionapi.UnitSnapshot, lists visionapi.UnitListsResponse) ([]visionapi.SystemdProperty, error) {
+	const (
+		unitInterface    = "org.freedesktop.systemd1.Unit"
+		serviceInterface = "org.freedesktop.systemd1.Service"
+	)
+
+	properties := make([]visionapi.SystemdProperty, 0, 16)
+	appendProperty := func(interfaceName, name, signature string, value any) error {
+		var err error
+		properties, err = appendSystemdProperty(properties, interfaceName, name, signature, value)
+		return err
+	}
+	if unit.SourcePath != "" {
+		if err := appendProperty(unitInterface, "FragmentPath", "s", unit.SourcePath); err != nil {
+			return nil, err
+		}
+	}
+	enabled := false
+	canonicalName := strings.TrimSuffix(strings.TrimSpace(unit.Name), ".service")
+	for _, name := range lists.EnabledUnits {
+		if strings.TrimSuffix(strings.TrimSpace(name), ".service") == canonicalName {
+			enabled = true
+			break
+		}
+	}
+	unitFileState := "disabled"
+	if enabled {
+		unitFileState = "enabled"
+	}
+	if err := appendProperty(unitInterface, "UnitFileState", "s", unitFileState); err != nil {
+		return nil, err
+	}
+	for _, dependency := range []struct {
+		name   string
+		values []string
+	}{
+		{name: "Requires", values: unit.Requires},
+		{name: "Wants", values: unit.Wants},
+		{name: "Before", values: unit.Before},
+		{name: "After", values: unit.After},
+	} {
+		values := uniqueSortedStrings(dependency.values)
+		if len(values) == 0 {
+			continue
+		}
+		if err := appendProperty(unitInterface, dependency.name, "as", values); err != nil {
+			return nil, err
+		}
+	}
+
+	if pid, err := strconv.ParseUint(strings.TrimSpace(snapshot.MainPID), 10, 32); err == nil && pid > 0 {
+		if err := appendProperty(serviceInterface, "MainPID", "u", pid); err != nil {
+			return nil, err
+		}
+		if err := appendProperty(serviceInterface, "ExecMainPID", "u", pid); err != nil {
+			return nil, err
+		}
+	}
+	if status := strings.TrimSpace(snapshot.Status); status != "" {
+		if err := appendProperty(serviceInterface, "StatusText", "s", status); err != nil {
+			return nil, err
+		}
+	}
+	if state := strings.TrimSpace(snapshot.State); state != "" {
+		result := "success"
+		if snapshot.Failure != "" || strings.Contains(strings.ToLower(state), "failed") || strings.Contains(strings.ToLower(state), "status ") {
+			result = "exit-code"
+		}
+		if err := appendProperty(serviceInterface, "Result", "s", result); err != nil {
+			return nil, err
+		}
+	}
+	for _, value := range []struct {
+		name  string
+		value string
+	}{
+		{name: "Type", value: unit.Type},
+		{name: "WorkingDirectory", value: unit.WorkingDirectory},
+		{name: "User", value: unit.User},
+		{name: "Group", value: unit.Group},
+	} {
+		if value.value == "" {
+			continue
+		}
+		if err := appendProperty(serviceInterface, value.name, "s", value.value); err != nil {
+			return nil, err
+		}
+	}
+	if len(unit.ExecStart) > 0 {
+		commands := make([]any, 0, len(unit.ExecStart))
+		for _, command := range unit.ExecStart {
+			argv, err := splitSystemdCommandLine(command)
+			if err != nil {
+				return nil, err
+			}
+			commands = append(commands, []any{argv[0], argv, false, uint64(0), uint64(0), uint64(0), uint64(0), uint32(0), int32(0), int32(0)})
+		}
+		if err := appendProperty(serviceInterface, "ExecStart", "a(sasbttttuii)", commands); err != nil {
+			return nil, err
+		}
+	}
+
+	return properties, nil
 }
 
 func discoverSystemdUnits(cfg Config) []string {
@@ -250,6 +471,14 @@ func normalizeUnitListNames(units []string) []string {
 	}
 	sort.Strings(result)
 	return result
+}
+
+func validUnitDetailName(name string) bool {
+	name = strings.TrimSpace(name)
+	if name == "" || strings.ContainsAny(name, "/\\\x00") || strings.IndexFunc(name, unicode.IsSpace) >= 0 {
+		return false
+	}
+	return strings.HasSuffix(name, ".service") || !strings.Contains(name, ".")
 }
 
 func runnerEventUpdate(event visionapi.EventEnvelope) (bool, bool) {
@@ -324,6 +553,7 @@ func newServicectlPlaneServer(mode string, hub *servicectlEventHub) servicectlPl
 		enabledUnits:           enabledStandaloneServicesFromS6Bundle,
 		discoverUnits:          discoverSystemdUnits,
 		collectSnapshots:       collectUnitSnapshots,
+		buildUnitDetail:        buildUnitDetailResponse,
 		canonicalizeStatusUnit: canonicalStatusManifestUnitForConfig,
 		buildStatusManifest:    buildStatusParticipationManifestForConfig,
 	}
@@ -358,6 +588,41 @@ func (s *servicectlPlaneServer) handler() http.Handler {
 			units = normalizeUnitListNames(units)
 		}
 		util.WriteJSON(w, s.collectSnapshots(s.cfg, units))
+	})
+	mux.HandleFunc("/v1/units/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+
+		rawPath := strings.TrimPrefix(r.URL.EscapedPath(), "/v1/units/")
+		if rawPath == "" || strings.Contains(rawPath, "/") {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		name, err := url.PathUnescape(rawPath)
+		if err != nil || !validUnitDetailName(name) {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		name = normalizeServiceUnitName(name)
+		lists, err := s.queryUnitLists(s.mode)
+		if err != nil {
+			w.WriteHeader(http.StatusBadGateway)
+			util.WriteJSON(w, map[string]string{"error": err.Error()})
+			return
+		}
+		payload, err := s.buildUnitDetail(s.cfg, name, lists)
+		if err != nil {
+			if errors.Is(err, errUnitDetailNotFound) {
+				w.WriteHeader(http.StatusNotFound)
+			} else {
+				w.WriteHeader(http.StatusInternalServerError)
+			}
+			util.WriteJSON(w, map[string]string{"error": err.Error()})
+			return
+		}
+		util.WriteJSON(w, payload)
 	})
 	mux.HandleFunc("/v1/refresh", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {

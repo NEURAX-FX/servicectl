@@ -1,6 +1,7 @@
 package visionapi
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -213,6 +214,18 @@ type UnitSnapshot struct {
 	VisionEpoch      string `json:"vision_epoch"`
 	Generation       uint64 `json:"generation"`
 	Lifecycle        string `json:"lifecycle"`
+}
+
+type SystemdProperty struct {
+	Interface string          `json:"interface"`
+	Name      string          `json:"name"`
+	Signature string          `json:"signature"`
+	Value     json.RawMessage `json:"value"`
+}
+
+type UnitDetailResponse struct {
+	Unit              UnitSnapshot      `json:"unit"`
+	SystemdProperties []SystemdProperty `json:"systemd_properties"`
 }
 
 type StatusManifestNamespace struct {

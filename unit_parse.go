@@ -37,6 +37,7 @@ type Unit struct {
 	KillSignal       string
 	Requires         []string
 	Wants            []string
+	Before           []string
 	After            []string
 	BindsTo          []string
 	PartOf           []string
@@ -168,6 +169,8 @@ func parseSystemdUnit(name string) (*Unit, error) {
 					unit.Requires = append(unit.Requires, strings.Fields(v)...)
 				case "Wants":
 					unit.Wants = append(unit.Wants, strings.Fields(v)...)
+				case "Before":
+					unit.Before = append(unit.Before, strings.Fields(v)...)
 				case "After":
 					unit.After = append(unit.After, strings.Fields(v)...)
 				case "BindsTo":

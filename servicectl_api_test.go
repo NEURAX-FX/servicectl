@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -179,6 +180,246 @@ func TestServicectlAPIDefaultUnitsUsesEffectiveList(t *testing.T) {
 	}
 	if len(payload.Units) != 1 || payload.Units[0].Name != "effective.service" {
 		t.Fatalf("payload = %#v", payload)
+	}
+}
+
+func TestUnitDetailResponsePreservesTypedPropertyValues(t *testing.T) {
+	payload := visionapi.UnitDetailResponse{
+		Unit: visionapi.UnitSnapshot{Name: "demo"},
+		SystemdProperties: []visionapi.SystemdProperty{
+			{Interface: "org.freedesktop.systemd1.Service", Name: "MainPID", Signature: "u", Value: json.RawMessage(`4242`)},
+			{Interface: "org.freedesktop.systemd1.Unit", Name: "After", Signature: "as", Value: json.RawMessage(`["network.target"]`)},
+		},
+	}
+
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(data); !strings.Contains(got, `"value":4242`) || !strings.Contains(got, `"value":["network.target"]`) {
+		t.Fatalf("encoded detail response = %s", got)
+	}
+
+	var decoded visionapi.UnitDetailResponse
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded.SystemdProperties) != 2 || string(decoded.SystemdProperties[0].Value) != "4242" || string(decoded.SystemdProperties[1].Value) != `["network.target"]` {
+		t.Fatalf("decoded detail response = %#v", decoded)
+	}
+}
+
+func TestBuildSystemdPropertiesIncludesAvailableMetadata(t *testing.T) {
+	unit := &Unit{
+		Name:             "demo",
+		SourcePath:       "/etc/systemd/system/demo.service",
+		Type:             "simple",
+		ExecStart:        []string{`/usr/bin/demo --label "hello world"`},
+		WorkingDirectory: "/srv/demo",
+		User:             "demo",
+		Group:            "demo",
+		Requires:         []string{"network.target", "network.target"},
+		Wants:            []string{"cache.service"},
+		Before:           []string{"consumer.service"},
+		After:            []string{"network.target", "cache.service"},
+	}
+	snapshot := visionapi.UnitSnapshot{
+		Name:    "demo",
+		State:   "STARTED",
+		MainPID: "4242",
+		Status:  "ready",
+	}
+	lists := visionapi.UnitListsResponse{EnabledUnits: []string{"demo.service"}}
+
+	properties, err := buildSystemdProperties(unit, snapshot, lists)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSystemdPropertyJSON(t, properties, "org.freedesktop.systemd1.Unit", "FragmentPath", "s", `"/etc/systemd/system/demo.service"`)
+	assertSystemdPropertyJSON(t, properties, "org.freedesktop.systemd1.Unit", "UnitFileState", "s", `"enabled"`)
+	assertSystemdPropertyJSON(t, properties, "org.freedesktop.systemd1.Unit", "Requires", "as", `["network.target"]`)
+	assertSystemdPropertyJSON(t, properties, "org.freedesktop.systemd1.Unit", "Wants", "as", `["cache.service"]`)
+	assertSystemdPropertyJSON(t, properties, "org.freedesktop.systemd1.Unit", "Before", "as", `["consumer.service"]`)
+	assertSystemdPropertyJSON(t, properties, "org.freedesktop.systemd1.Unit", "After", "as", `["cache.service","network.target"]`)
+	assertSystemdPropertyJSON(t, properties, "org.freedesktop.systemd1.Service", "MainPID", "u", `4242`)
+	assertSystemdPropertyJSON(t, properties, "org.freedesktop.systemd1.Service", "ExecMainPID", "u", `4242`)
+	assertSystemdPropertyJSON(t, properties, "org.freedesktop.systemd1.Service", "StatusText", "s", `"ready"`)
+	assertSystemdPropertyJSON(t, properties, "org.freedesktop.systemd1.Service", "Result", "s", `"success"`)
+	assertSystemdPropertyJSON(t, properties, "org.freedesktop.systemd1.Service", "Type", "s", `"simple"`)
+	assertSystemdPropertyJSON(t, properties, "org.freedesktop.systemd1.Service", "WorkingDirectory", "s", `"/srv/demo"`)
+	assertSystemdPropertyJSON(t, properties, "org.freedesktop.systemd1.Service", "User", "s", `"demo"`)
+	assertSystemdPropertyJSON(t, properties, "org.freedesktop.systemd1.Service", "Group", "s", `"demo"`)
+	assertSystemdPropertyJSON(t, properties, "org.freedesktop.systemd1.Service", "ExecStart", "a(sasbttttuii)", `[["/usr/bin/demo",["/usr/bin/demo","--label","hello world"],false,0,0,0,0,0,0,0]]`)
+}
+
+func TestBuildSystemdPropertiesOmitsUnavailableMetadata(t *testing.T) {
+	unit := &Unit{Name: "demo", SourcePath: "/etc/systemd/system/demo.service"}
+	snapshot := visionapi.UnitSnapshot{Name: "demo", MainPID: "0"}
+
+	properties, err := buildSystemdProperties(unit, snapshot, visionapi.UnitListsResponse{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"MainPID", "ExecMainPID", "StatusText", "Result", "Type", "ExecStart", "WorkingDirectory", "User", "Group"} {
+		if findSystemdProperty(properties, "org.freedesktop.systemd1.Service", name) != nil {
+			t.Fatalf("unavailable property %s was published: %#v", name, properties)
+		}
+	}
+	for _, name := range []string{"Requires", "Wants", "Before", "After"} {
+		if findSystemdProperty(properties, "org.freedesktop.systemd1.Unit", name) != nil {
+			t.Fatalf("empty dependency %s was published: %#v", name, properties)
+		}
+	}
+	assertSystemdPropertyJSON(t, properties, "org.freedesktop.systemd1.Unit", "FragmentPath", "s", `"/etc/systemd/system/demo.service"`)
+	assertSystemdPropertyJSON(t, properties, "org.freedesktop.systemd1.Unit", "UnitFileState", "s", `"disabled"`)
+}
+
+func assertSystemdPropertyJSON(t *testing.T, properties []visionapi.SystemdProperty, interfaceName, name, signature, wantJSON string) {
+	t.Helper()
+	property := findSystemdProperty(properties, interfaceName, name)
+	if property == nil {
+		t.Fatalf("property %s.%s missing from %#v", interfaceName, name, properties)
+	}
+	if property.Signature != signature || string(property.Value) != wantJSON {
+		t.Fatalf("property %s.%s = signature %q value %s, want %q %s", interfaceName, name, property.Signature, property.Value, signature, wantJSON)
+	}
+}
+
+func findSystemdProperty(properties []visionapi.SystemdProperty, interfaceName, name string) *visionapi.SystemdProperty {
+	index := slices.IndexFunc(properties, func(property visionapi.SystemdProperty) bool {
+		return property.Interface == interfaceName && property.Name == name
+	})
+	if index < 0 {
+		return nil
+	}
+	return &properties[index]
+}
+
+func TestServicectlAPIUnitDetailReturnsTypedSnapshot(t *testing.T) {
+	server := newServicectlPlaneServer(visionapi.ModeSystem, newServicectlEventHub())
+	queries := 0
+	server.queryUnitLists = func(mode string) (visionapi.UnitListsResponse, error) {
+		queries++
+		if mode != visionapi.ModeSystem {
+			t.Fatalf("mode = %q", mode)
+		}
+		return visionapi.UnitListsResponse{EnabledUnits: []string{"demo.service"}}, nil
+	}
+	server.buildUnitDetail = func(_ Config, name string, lists visionapi.UnitListsResponse) (visionapi.UnitDetailResponse, error) {
+		if name != "demo.service" {
+			t.Fatalf("name = %q", name)
+		}
+		if !reflect.DeepEqual(lists.EnabledUnits, []string{"demo.service"}) {
+			t.Fatalf("lists = %#v", lists)
+		}
+		return visionapi.UnitDetailResponse{
+			Unit: visionapi.UnitSnapshot{Name: name, State: "STARTED"},
+			SystemdProperties: []visionapi.SystemdProperty{{
+				Interface: "org.freedesktop.systemd1.Service",
+				Name:      "MainPID",
+				Signature: "u",
+				Value:     json.RawMessage(`4242`),
+			}},
+		}, nil
+	}
+
+	response := httptest.NewRecorder()
+	server.handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/units/demo", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("code = %d, body = %s", response.Code, response.Body.String())
+	}
+	if queries != 1 {
+		t.Fatalf("list queries = %d", queries)
+	}
+	var payload visionapi.UnitDetailResponse
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Unit.Name != "demo.service" || len(payload.SystemdProperties) != 1 || string(payload.SystemdProperties[0].Value) != "4242" {
+		t.Fatalf("payload = %#v", payload)
+	}
+}
+
+func TestServicectlAPIUnitDetailNormalizesEscapedNameOnce(t *testing.T) {
+	server := newServicectlPlaneServer(visionapi.ModeSystem, newServicectlEventHub())
+	server.queryUnitLists = func(string) (visionapi.UnitListsResponse, error) {
+		return visionapi.UnitListsResponse{}, nil
+	}
+	server.buildUnitDetail = func(_ Config, name string, _ visionapi.UnitListsResponse) (visionapi.UnitDetailResponse, error) {
+		if name != "demo%2fname.service" {
+			t.Fatalf("name = %q", name)
+		}
+		return visionapi.UnitDetailResponse{Unit: visionapi.UnitSnapshot{Name: name}}, nil
+	}
+
+	response := httptest.NewRecorder()
+	server.handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/units/demo%252fname.service", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("code = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
+func TestServicectlAPIUnitDetailRejectsInvalidNames(t *testing.T) {
+	for _, path := range []string{
+		"/v1/units/",
+		"/v1/units/demo/child",
+		"/v1/units/demo%2Fchild",
+		"/v1/units/demo%5Cchild",
+		"/v1/units/demo%20child",
+		"/v1/units/demo%00child",
+		"/v1/units/demo.target",
+	} {
+		t.Run(path, func(t *testing.T) {
+			server := newServicectlPlaneServer(visionapi.ModeSystem, newServicectlEventHub())
+			server.queryUnitLists = func(string) (visionapi.UnitListsResponse, error) {
+				t.Fatal("invalid request queried unit lists")
+				return visionapi.UnitListsResponse{}, nil
+			}
+			server.buildUnitDetail = func(Config, string, visionapi.UnitListsResponse) (visionapi.UnitDetailResponse, error) {
+				t.Fatal("invalid request built unit detail")
+				return visionapi.UnitDetailResponse{}, nil
+			}
+			response := httptest.NewRecorder()
+			server.handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("path %q code = %d, body = %s", path, response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestServicectlAPIUnitDetailMapsErrors(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		err  error
+		code int
+	}{
+		{name: "not found", err: errUnitDetailNotFound, code: http.StatusNotFound},
+		{name: "build failure", err: errors.New("boom"), code: http.StatusInternalServerError},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := newServicectlPlaneServer(visionapi.ModeSystem, newServicectlEventHub())
+			server.queryUnitLists = func(string) (visionapi.UnitListsResponse, error) {
+				return visionapi.UnitListsResponse{}, nil
+			}
+			server.buildUnitDetail = func(Config, string, visionapi.UnitListsResponse) (visionapi.UnitDetailResponse, error) {
+				return visionapi.UnitDetailResponse{}, test.err
+			}
+			response := httptest.NewRecorder()
+			server.handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/units/demo.service", nil))
+			if response.Code != test.code {
+				t.Fatalf("code = %d, body = %s", response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestServicectlAPIUnitDetailRejectsNonGet(t *testing.T) {
+	server := newServicectlPlaneServer(visionapi.ModeSystem, newServicectlEventHub())
+	response := httptest.NewRecorder()
+	server.handler().ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/units/demo.service", nil))
+	if response.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("code = %d", response.Code)
 	}
 }
 
