@@ -23,10 +23,33 @@ func (r *SystemdUnitResolver) ResolveExplicit(name string) (ManagedRoute, error)
 	if unit == "" {
 		return ManagedRoute{}, ErrUnitNotFound
 	}
-	if _, err := r.findUnit(unit); err != nil {
+	path, _, err := r.findUnit(unit)
+	if err != nil {
 		return ManagedRoute{}, err
 	}
-	return r.route(unit), nil
+	// SystemdService= normally points at the dbus-<busname> alias symlink. ResolveBusName already reports
+	// the symlink target, so routing the alias verbatim would give one unit two managed services.
+	return r.route(r.canonicalUnit(unit, path)), nil
+}
+
+// canonicalUnit resolves alias symlinks to the unit they point at, but only while the target stays inside
+// the configured search paths: a unit outside them cannot be loaded, so the requested name is kept.
+func (r *SystemdUnitResolver) canonicalUnit(unit, path string) string {
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return unit
+	}
+	target := normalizeUnit(filepath.Base(resolved))
+	if target == "" || target == unit {
+		return unit
+	}
+	directory := filepath.Dir(resolved)
+	for _, candidate := range r.paths {
+		if filepath.Clean(candidate) == directory {
+			return target
+		}
+	}
+	return unit
 }
 
 func (r *SystemdUnitResolver) ResolveBusName(busName string) ([]ManagedRoute, error) {
@@ -87,18 +110,18 @@ func (r *SystemdUnitResolver) route(unit string) ManagedRoute {
 	}
 }
 
-func (r *SystemdUnitResolver) findUnit(unit string) (unitMetadata, error) {
+func (r *SystemdUnitResolver) findUnit(unit string) (string, unitMetadata, error) {
 	for _, directory := range r.paths {
 		path := filepath.Join(directory, unit+".service")
 		metadata, err := parseUnitMetadata(path)
 		if err == nil {
-			return metadata, nil
+			return path, metadata, nil
 		}
 		if !os.IsNotExist(err) {
-			return unitMetadata{}, err
+			return "", unitMetadata{}, err
 		}
 	}
-	return unitMetadata{}, fmt.Errorf("%w: %s.service", ErrUnitNotFound, unit)
+	return "", unitMetadata{}, fmt.Errorf("%w: %s.service", ErrUnitNotFound, unit)
 }
 
 type unitMetadata struct {

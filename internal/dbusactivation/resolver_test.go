@@ -73,6 +73,53 @@ func TestSystemdUnitResolverDeduplicatesSymlinkAlias(t *testing.T) {
 	}
 }
 
+func TestSystemdUnitResolverResolvesExplicitSymlinkAliasToCanonicalUnit(t *testing.T) {
+	dir := t.TempDir()
+	writeUnit(t, dir, "systemd-timedated.service", "notify", "org.freedesktop.timedate1")
+	if err := os.Symlink("systemd-timedated.service", filepath.Join(dir, "dbus-org.freedesktop.timedate1.service")); err != nil {
+		t.Fatal(err)
+	}
+	resolver := NewSystemdUnitResolver([]string{dir}, "/run/managed")
+
+	// SystemdService= in a D-Bus service file usually names the dbus-<busname> alias symlink. Routing it
+	// under the alias name would create a second managed service for a unit that ResolveBusName already
+	// tracks under its canonical name.
+	alias, err := resolver.ResolveExplicit("dbus-org.freedesktop.timedate1.service")
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := resolver.ResolveExplicit("systemd-timedated.service")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if alias != canonical {
+		t.Fatalf("alias route = %#v, canonical route = %#v, want identical", alias, canonical)
+	}
+	if alias.Unit != "systemd-timedated" {
+		t.Fatalf("alias route unit = %q, want systemd-timedated", alias.Unit)
+	}
+}
+
+func TestSystemdUnitResolverKeepsExplicitUnitWhenSymlinkEscapesSearchPath(t *testing.T) {
+	dir := t.TempDir()
+	outside := t.TempDir()
+	writeUnit(t, outside, "hidden.service", "notify", "org.example.Hidden")
+	if err := os.Symlink(filepath.Join(outside, "hidden.service"), filepath.Join(dir, "visible.service")); err != nil {
+		t.Fatal(err)
+	}
+	resolver := NewSystemdUnitResolver([]string{dir}, "/run/managed")
+
+	// Following a symlink out of the search path would route to a unit servicectl cannot load, so the
+	// requested name has to win.
+	route, err := resolver.ResolveExplicit("visible.service")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if route.Unit != "visible" {
+		t.Fatalf("route unit = %q, want visible", route.Unit)
+	}
+}
+
 func TestSystemdUnitResolverRejectsPathTraversal(t *testing.T) {
 	resolver := NewSystemdUnitResolver([]string{t.TempDir()}, "/run/managed")
 	for _, name := range []string{"../outside.service", "nested/unit.service", ".service"} {
