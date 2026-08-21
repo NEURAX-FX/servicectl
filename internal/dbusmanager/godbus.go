@@ -56,6 +56,12 @@ func (b *Godbus) StartServiceByName(ctx context.Context, name string) error {
 	return b.conn.Object("org.freedesktop.DBus", "/org/freedesktop/DBus").CallWithContext(ctx, "org.freedesktop.DBus.StartServiceByName", 0, name, uint32(0)).Store(&result)
 }
 
+// ReloadConfig makes the bus daemon reread its configuration, which is the only way a freshly written
+// activation file in a system-services directory becomes visible to it.
+func (b *Godbus) ReloadConfig(ctx context.Context) error {
+	return b.conn.Object("org.freedesktop.DBus", "/org/freedesktop/DBus").CallWithContext(ctx, "org.freedesktop.DBus.ReloadConfig", 0).Store()
+}
+
 func (b *Godbus) GetNameOwner(ctx context.Context, name string) (string, error) {
 	var owner string
 	err := b.conn.Object("org.freedesktop.DBus", "/org/freedesktop/DBus").CallWithContext(ctx, "org.freedesktop.DBus.GetNameOwner", 0, name).Store(&owner)

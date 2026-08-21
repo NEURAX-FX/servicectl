@@ -1,12 +1,19 @@
 package main
 
 import (
+	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
+
+	"servicectl/internal/dbusactivation"
+	"servicectl/internal/dbusmanager"
 )
 
 type managedServiceMode string
@@ -448,6 +455,45 @@ func generateDBusActivationFile(unitName string, busName string) string {
 	return sb.String()
 }
 
+var reloadDBusConfigFunc = reloadDBusConfig
+
+// reloadDBusConfig republishes the system-services directory to both consumers that cache it:
+// dbus-daemon rereads its service directories only at startup and on ReloadConfig, and sys-dbusd keeps
+// its own parsed service index. Missing either one leaves a freshly installed bus name unactivatable.
+func reloadDBusConfig() error {
+	return errors.Join(reloadBusDaemonConfig(), reloadActivationCoreIndex())
+}
+
+func reloadBusDaemonConfig() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var (
+		bus *dbusmanager.Godbus
+		err error
+	)
+	if userMode() {
+		bus, err = dbusmanager.NewSessionBus()
+	} else {
+		bus, err = dbusmanager.NewSystemBus()
+	}
+	if err != nil {
+		return err
+	}
+	defer bus.Close()
+	return bus.ReloadConfig(ctx)
+}
+
+func reloadActivationCoreIndex() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	client, err := dbusactivation.DialClient(ctx, defaultActivationPathsFn().ControlPath, dbusactivation.FrontendAdmin)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+	return client.Reload(ctx)
+}
+
 func installDBusActivationFile(unit *Unit) bool {
 	if unit == nil || strings.TrimSpace(unit.BusName) == "" || strings.TrimSpace(config.DBusServiceDir) == "" {
 		return true
@@ -458,9 +504,16 @@ func installDBusActivationFile(unit *Unit) bool {
 	}
 	path := filepath.Join(config.DBusServiceDir, strings.TrimSpace(unit.BusName)+".service")
 	content := []byte(generateDBusActivationFile(unit.Name, unit.BusName))
+	if existing, err := os.ReadFile(path); err == nil && bytes.Equal(existing, content) {
+		return true
+	}
 	if err := os.WriteFile(path, content, 0644); err != nil {
 		fmt.Printf("Error writing D-Bus activation file for %s: %v\n", unit.Name, err)
 		return false
+	}
+	// A missing or offline bus is not an install failure: the daemon reads the directory when it starts.
+	if err := reloadDBusConfigFunc(); err != nil {
+		fmt.Printf("Warning: could not ask D-Bus to reload activation files for %s: %v\n", unit.Name, err)
 	}
 	return true
 }

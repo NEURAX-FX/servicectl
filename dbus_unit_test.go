@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -262,6 +263,80 @@ func TestRecursiveInstallWritesDBusActivationFile(t *testing.T) {
 	}
 	if strings.Contains(activationText, "SystemdService=") {
 		t.Fatalf("activation file should not delegate back to systemd: %q", activationText)
+	}
+}
+
+func TestInstallDBusActivationFileReloadsBusConfigOnChange(t *testing.T) {
+	oldConfig := config
+	oldReload := reloadDBusConfigFunc
+	defer func() {
+		config = oldConfig
+		reloadDBusConfigFunc = oldReload
+	}()
+
+	tempDir := t.TempDir()
+	config = Config{
+		Mode:           "system",
+		SystemdPaths:   []string{tempDir},
+		DBusServiceDir: filepath.Join(tempDir, "dbus-services"),
+	}
+	unit := &Unit{Name: "systemd-hostnamed", BusName: "org.freedesktop.hostname1"}
+
+	reloads := 0
+	reloadDBusConfigFunc = func() error {
+		reloads++
+		return nil
+	}
+
+	// A newly written activation file is invisible to dbus-daemon until it rereads its configuration.
+	if !installDBusActivationFile(unit) {
+		t.Fatal("installDBusActivationFile failed for new activation file")
+	}
+	if reloads != 1 {
+		t.Fatalf("reload count after creating activation file = %d, want 1", reloads)
+	}
+
+	// Rewriting identical content changes nothing on the bus, so it must not trigger another reload.
+	if !installDBusActivationFile(unit) {
+		t.Fatal("installDBusActivationFile failed for unchanged activation file")
+	}
+	if reloads != 1 {
+		t.Fatalf("reload count after rewriting identical file = %d, want 1", reloads)
+	}
+
+	// Changed content must be published again.
+	unit.BusName = "org.freedesktop.hostname1"
+	unit.Name = "systemd-hostnamed-next"
+	if !installDBusActivationFile(unit) {
+		t.Fatal("installDBusActivationFile failed for changed activation file")
+	}
+	if reloads != 2 {
+		t.Fatalf("reload count after changing activation file = %d, want 2", reloads)
+	}
+}
+
+func TestInstallDBusActivationFileSucceedsWhenBusUnavailable(t *testing.T) {
+	oldConfig := config
+	oldReload := reloadDBusConfigFunc
+	defer func() {
+		config = oldConfig
+		reloadDBusConfigFunc = oldReload
+	}()
+
+	tempDir := t.TempDir()
+	config = Config{
+		Mode:           "system",
+		SystemdPaths:   []string{tempDir},
+		DBusServiceDir: filepath.Join(tempDir, "dbus-services"),
+	}
+	reloadDBusConfigFunc = func() error { return errors.New("no bus") }
+
+	// Installing units must work on an offline system; the bus simply picks the file up when it starts.
+	if !installDBusActivationFile(&Unit{Name: "systemd-hostnamed", BusName: "org.freedesktop.hostname1"}) {
+		t.Fatal("installDBusActivationFile must tolerate an unreachable bus")
+	}
+	if _, err := os.Stat(filepath.Join(config.DBusServiceDir, "org.freedesktop.hostname1.service")); err != nil {
+		t.Fatalf("activation file missing: %v", err)
 	}
 }
 
