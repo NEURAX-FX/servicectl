@@ -208,6 +208,25 @@ func (s *Server) managedCgroupPath() string {
 
 func (s *Server) dispatch(ctx context.Context, scope Scope, request Request) Response {
 	switch request.Operation {
+	case OpPrepare, OpRelease:
+		native, ok := s.service.(interface {
+			Prepare(context.Context, Scope, string) (UnitStatus, error)
+			Release(context.Context, Scope, string) error
+		})
+		if !ok {
+			return failureResponse("unavailable", errors.New("native preparation is unavailable"))
+		}
+		if request.Operation == OpRelease {
+			if err := native.Release(ctx, scope, request.Unit); err != nil {
+				return failureResponse("release-failed", err)
+			}
+			return Response{OK: true}
+		}
+		unit, err := native.Prepare(ctx, scope, request.Unit)
+		if err != nil {
+			return failureResponse("prepare-failed", err)
+		}
+		return Response{OK: true, Unit: &unit}
 	case OpStatus:
 		status, err := s.service.Status(ctx, scope)
 		if err != nil {
@@ -265,6 +284,13 @@ func authorizeRequestWithRoot(peer Peer, request Request, daemonNamespace FileId
 	}
 	if request.Mode != ModeUser || request.UID != peer.UID {
 		return Scope{}, ErrAccessDenied
+	}
+	if request.Operation == OpPrepare {
+		group, err := proc.ReadCgroup(peer.PID)
+		prefix := filepath.Join(managedRoot, "user", strconv.FormatUint(uint64(peer.UID), 10))
+		if err != nil || (group != prefix && !strings.HasPrefix(group, prefix+"/")) {
+			return Scope{}, errors.New("native user cgroups require a delegated user manager inside its UID subtree")
+		}
 	}
 	if request.Operation == OpAttach {
 		if err := authorizeAttachPID(peer, request, proc, managedRoot); err != nil {

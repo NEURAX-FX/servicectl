@@ -17,6 +17,7 @@ type Config struct {
 	DBusServiceDir    string
 	UnitExtraDir      string
 	IsRoot            bool
+	NativeCgroups     bool
 }
 
 var (
@@ -33,7 +34,8 @@ func buildConfig(userMode bool) Config {
 	home := os.Getenv("HOME")
 	xdgRuntimeDir := os.Getenv("XDG_RUNTIME_DIR")
 	cfg := Config{
-		IsRoot: currentUser != nil && currentUser.Uid == "0",
+		IsRoot:        currentUser != nil && currentUser.Uid == "0",
+		NativeCgroups: true,
 	}
 	if userMode {
 		cfg.Mode = "user"
@@ -166,8 +168,5 @@ func syncUserDinitEnvironment() {
 	for _, key := range keys {
 		args = append(args, key+"="+env[key])
 	}
-	cmd := dinitctlCommand(args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	_ = cmd.Run()
+	_, _, _ = nativeDinitCommand(args...)
 }

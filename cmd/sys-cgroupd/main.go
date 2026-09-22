@@ -113,6 +113,9 @@ type unitWork struct {
 
 type scheduler struct {
 	mu            sync.Mutex
+	nativeMu      sync.Mutex
+	registryMu    sync.Mutex
+	native        map[cgrouptrack.UnitKey]bool
 	bootID        string
 	settleDelay   time.Duration
 	afterFunc     afterFunc
@@ -143,7 +146,8 @@ func newScheduler(options schedulerOptions) *scheduler {
 	}
 	return &scheduler{
 		bootID: options.bootID, settleDelay: delay, afterFunc: after,
-		proc: options.proc, groups: options.groups, migrator: migrator,
+		native: make(map[cgrouptrack.UnitKey]bool),
+		proc:   options.proc, groups: options.groups, migrator: migrator,
 		registryPath: options.registryPath, units: make(map[cgrouptrack.UnitKey]*unitWork),
 	}
 }
@@ -174,6 +178,9 @@ func (s *scheduler) ReplaceGroups(groups cgrouptrack.CgroupFS) {
 func (s *scheduler) LoadRegistry(registry cgrouptrack.Registry) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	for _, key := range registry.Native {
+		s.native[key] = true
+	}
 	for _, record := range registry.Units {
 		if record.Identity.BootID != s.bootID || record.Identity.Validate() != nil {
 			continue
@@ -275,7 +282,12 @@ func (s *scheduler) migrateCurrent(identity cgrouptrack.InstanceIdentity) {
 		s.updateMigration(identity, cgrouptrack.MigrationResult{State: cgrouptrack.StateDegraded, Err: err})
 		return
 	}
-	result := s.currentMigrator().Migrate(context.Background(), identity)
+	var result cgrouptrack.MigrationResult
+	if s.nativeDeclared(identity.UnitKey) {
+		result = s.verifyNative(identity)
+	} else {
+		result = s.currentMigrator().Migrate(context.Background(), identity)
+	}
 	s.updateMigration(identity, result)
 }
 
@@ -320,7 +332,7 @@ func (s *scheduler) Stopped(key cgrouptrack.UnitKey, epoch string, generation ui
 	} else if len(pids) != 0 {
 		state = cgrouptrack.StateOrphanedPopulated
 	} else {
-		_, _ = groups.RemoveIfEmpty(key)
+		s.removeUndeclaredEmpty(key)
 		removeRecord = true
 	}
 	s.mu.Lock()
@@ -420,7 +432,7 @@ func (s *scheduler) Missing(key cgrouptrack.UnitKey) {
 		s.mu.Unlock()
 		return
 	}
-	_, _ = groups.RemoveIfEmpty(key)
+	s.removeUndeclaredEmpty(key)
 	s.mu.Lock()
 	if s.units[key] == work {
 		delete(s.units, key)
@@ -462,7 +474,7 @@ func (s *scheduler) ReconcileGroups(context.Context) error {
 		s.mu.Unlock()
 		if work == nil {
 			if len(group.PIDs) == 0 {
-				_, _ = backend.RemoveIfEmpty(group.Key)
+				s.removeUndeclaredEmpty(group.Key)
 				continue
 			}
 			s.mu.Lock()
@@ -695,10 +707,16 @@ func (s *scheduler) groupsRoot() string {
 }
 
 func (s *scheduler) saveRegistry() error {
+	s.registryMu.Lock()
+	defer s.registryMu.Unlock()
 	if s.registryPath == "" {
 		return nil
 	}
 	s.mu.Lock()
+	native := make([]cgrouptrack.UnitKey, 0, len(s.native))
+	for key := range s.native {
+		native = append(native, key)
+	}
 	records := make([]cgrouptrack.UnitRecord, 0, len(s.units))
 	for _, work := range s.units {
 		record := cgrouptrack.UnitRecord{Identity: work.identity, State: work.state, RetryCount: work.retryCount, LastError: work.lastError}
@@ -710,7 +728,7 @@ func (s *scheduler) saveRegistry() error {
 		}
 	}
 	s.mu.Unlock()
-	return cgrouptrack.WriteRegistry(s.registryPath, cgrouptrack.Registry{Version: 1, Units: records})
+	return cgrouptrack.WriteRegistry(s.registryPath, cgrouptrack.Registry{Version: 1, Units: records, Native: native})
 }
 
 type VisionSource interface {

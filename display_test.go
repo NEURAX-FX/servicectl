@@ -585,19 +585,6 @@ func TestRenderListJSON(t *testing.T) {
 	}
 }
 
-func TestParseDinitListRows(t *testing.T) {
-	rows := parseDinitListRows("[[+]     ] demo-notifyd (pid: 42)\n[     {X}] broken-orchestrd (exit status: 1)\n[{+}     ] demo-log (pid: 43)\n[     {-}] stopped-log\n")
-	want := []dinitListRow{
-		{Name: "demo-notifyd", RuntimeState: "active", PID: 42},
-		{Name: "broken-orchestrd", RuntimeState: "failed"},
-		{Name: "demo-log", RuntimeState: "active", PID: 43},
-		{Name: "stopped-log", RuntimeState: "inactive"},
-	}
-	if !reflect.DeepEqual(rows, want) {
-		t.Fatalf("rows = %#v, want %#v", rows, want)
-	}
-}
-
 func TestCollectListViewUsesSysvisionAndEnrichesRows(t *testing.T) {
 	source := displayDataSource{
 		queryUnits: func() (visionapi.UnitsResponse, bool) {
@@ -653,8 +640,8 @@ func TestCollectListViewIncludesInternalRowsWithAll(t *testing.T) {
 		},
 		parseUnit: func(name string) (*Unit, error) { return &Unit{Name: name + ".service", Type: "notify"}, nil },
 		enabled:   func(string) bool { return true },
-		dinitList: func(...string) (string, int, error) {
-			return "[[+]     ] demo-notifyd (pid: 41)\n[{+}     ] demo-log (pid: 40)\n", 0, nil
+		dinitList: func() ([]dinitListRow, error) {
+			return []dinitListRow{{Name: "demo-notifyd", RuntimeState: "active", PID: 41}, {Name: "demo-log", RuntimeState: "active", PID: 40}}, nil
 		},
 		orchestratorExists: func(name string) bool { return name == "demo" },
 		orchestratorPID:    func(string) string { return "39" },

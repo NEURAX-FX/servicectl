@@ -18,6 +18,7 @@ import (
 
 	"servicectl/internal/dbusactivation"
 	"servicectl/internal/dbusmanager"
+	"servicectl/internal/dinit"
 )
 
 type pathList []string
@@ -41,7 +42,6 @@ type daemonConfig struct {
 	daemonPID         int32
 	adminPath         string
 	servicectlPath    string
-	dinitctlPath      string
 	managedRuntimeDir string
 	busAddress        string
 	activationTimeout time.Duration
@@ -58,7 +58,6 @@ func defaultConfig() daemonConfig {
 		helperPath:        "/usr/libexec/servicectl/sys-dbusd-daemon-helper",
 		adminPath:         "/usr/bin/servicectl",
 		servicectlPath:    "/usr/bin/servicectl",
-		dinitctlPath:      "/usr/bin/dinitctl",
 		managedRuntimeDir: "/run/servicectl/managed",
 		activationTimeout: 30 * time.Second,
 		stateFile:         "/run/servicectl/sys-dbusd/state.json",
@@ -78,7 +77,6 @@ func parseConfig(args []string) (daemonConfig, error) {
 	fs.StringVar(&cfg.helperPath, "helper-path", cfg.helperPath, "authorized dbus-daemon helper executable")
 	fs.StringVar(&cfg.adminPath, "admin-path", cfg.adminPath, "authorized administrative client executable")
 	fs.StringVar(&cfg.servicectlPath, "servicectl-path", cfg.servicectlPath, "servicectl executable")
-	fs.StringVar(&cfg.dinitctlPath, "dinitctl-path", cfg.dinitctlPath, "dinitctl executable")
 	fs.StringVar(&cfg.managedRuntimeDir, "managed-runtime-dir", cfg.managedRuntimeDir, "managed runtime root")
 	fs.StringVar(&cfg.busAddress, "bus-address", "", "explicit D-Bus address instead of the system bus")
 	fs.DurationVar(&cfg.activationTimeout, "activation-timeout", cfg.activationTimeout, "maximum time to acquire a D-Bus name")
@@ -96,7 +94,7 @@ func parseConfig(args []string) (daemonConfig, error) {
 	if cfg.activationTimeout <= 0 {
 		return daemonConfig{}, errors.New("activation timeout must be positive")
 	}
-	if cfg.controlPath == "" || cfg.servicectlPath == "" || cfg.dinitctlPath == "" || cfg.managedRuntimeDir == "" {
+	if cfg.controlPath == "" || cfg.servicectlPath == "" || cfg.managedRuntimeDir == "" {
 		return daemonConfig{}, errors.New("required path is empty")
 	}
 	return cfg, nil
@@ -287,7 +285,8 @@ func run(cfg daemonConfig, logger *log.Logger) error {
 			return prepareManagedUnit(ctx, cfg.servicectlPath, unit)
 		},
 		Start: func(ctx context.Context, service string) error {
-			return runCommand(ctx, cfg.dinitctlPath, "start", service)
+			_, err := dinit.Call(ctx, false, dinit.Request{Action: "start", Name: service})
+			return err
 		},
 		Activate: dbusactivation.ActivateControl,
 	})

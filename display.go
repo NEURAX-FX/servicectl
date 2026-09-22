@@ -139,7 +139,7 @@ type displayDataSource struct {
 	buildSnapshot      func(Config, string) (visionapi.UnitSnapshot, error)
 	parseUnit          func(string) (*Unit, error)
 	enabled            func(string) bool
-	dinitList          func(...string) (string, int, error)
+	dinitList          func() ([]dinitListRow, error)
 	orchestratorExists func(string) bool
 	orchestratorPID    func(string) string
 	s6Services         func() []dinitListRow
@@ -152,7 +152,7 @@ func defaultDisplayDataSource() displayDataSource {
 		buildSnapshot: buildUnitSnapshot,
 		parseUnit:     parseSystemdUnit,
 		enabled:       isEffectivelyEnabled,
-		dinitList:     dinitctlOutput,
+		dinitList:     nativeDinitList,
 		orchestratorExists: func(name string) bool {
 			return s6OwnerMatchesCurrentMode(s6OrchestrdSourceDir(name))
 		},
@@ -251,45 +251,6 @@ func internalServiceRole(name string) string {
 	}
 }
 
-func parseDinitListRows(output string) []dinitListRow {
-	rows := make([]dinitListRow, 0)
-	for _, line := range strings.Split(output, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		close := strings.LastIndex(line, "] ")
-		if close < 0 {
-			continue
-		}
-		prefix := line[:close+1]
-		rest := strings.TrimSpace(line[close+2:])
-		name := rest
-		if index := strings.Index(rest, " ("); index >= 0 {
-			name = rest[:index]
-		}
-		state := "inactive"
-		switch {
-		case strings.Contains(prefix, "X") || strings.Contains(rest, "exit status:"):
-			state = "failed"
-		case strings.Contains(prefix, "+"):
-			state = "active"
-		case strings.Contains(prefix, "{+") || strings.Contains(prefix, "{{"):
-			state = "activating"
-		}
-		pid := 0
-		if start := strings.Index(rest, "(pid: "); start >= 0 {
-			value := rest[start+6:]
-			if end := strings.IndexByte(value, ')'); end >= 0 {
-				value = value[:end]
-			}
-			pid, _ = strconv.Atoi(strings.TrimSpace(value))
-		}
-		rows = append(rows, dinitListRow{Name: strings.TrimSpace(name), RuntimeState: state, PID: pid})
-	}
-	return rows
-}
-
 func collectListView(source displayDataSource, includeInternal bool) (listView, error) {
 	view := listView{SchemaVersion: 1, Mode: config.Mode, GeneratedAt: time.Now().UTC().Format(time.RFC3339Nano)}
 	response, ok := source.queryUnits()
@@ -337,8 +298,8 @@ func collectListView(source displayDataSource, includeInternal bool) (listView, 
 	}
 	seenInternal := make(map[string]bool)
 	if source.dinitList != nil {
-		output, _, _ := source.dinitList("list")
-		for _, row := range parseDinitListRows(output) {
+		rows, _ := source.dinitList()
+		for _, row := range rows {
 			role := internalServiceRole(row.Name)
 			if role == "service" || seenInternal[row.Name] {
 				continue

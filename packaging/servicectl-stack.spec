@@ -344,12 +344,10 @@ test ! -e "%{buildroot}/run"
 
 %post -n servicectl
 %tmpfiles_create servicectl.conf
-if command -v dinitctl >/dev/null 2>&1; then
-  dinitctl stop sys-cgroupd >/dev/null 2>&1 || :
-  dinitctl unload sys-cgroupd >/dev/null 2>&1 || :
-  dinitctl stop sys-dbusd >/dev/null 2>&1 || :
-  dinitctl unload sys-dbusd >/dev/null 2>&1 || :
-fi
+%{_bindir}/servicectl dinit stop sys-cgroupd >/dev/null 2>&1 || :
+%{_bindir}/servicectl dinit unload sys-cgroupd >/dev/null 2>&1 || :
+%{_bindir}/servicectl dinit stop sys-dbusd >/dev/null 2>&1 || :
+%{_bindir}/servicectl dinit unload sys-dbusd >/dev/null 2>&1 || :
 rm -f %{_sysconfdir}/dinit.d/sys-cgroupd
 rm -f %{_sysconfdir}/dinit.d/sys-dbusd
 %{_bindir}/servicectl ensure-s6

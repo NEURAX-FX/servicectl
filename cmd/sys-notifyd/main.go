@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+	"servicectl/internal/procinfo"
 	"servicectl/internal/visionapi"
 )
 
@@ -125,6 +126,9 @@ type childExitEvent struct {
 
 func main() {
 	cfg := parseFlags()
+	if cfg.readyFD >= 3 {
+		syscall.CloseOnExec(cfg.readyFD)
+	}
 	logger := log.New(os.Stdout, "sys-notifyd: ", log.LstdFlags)
 
 	srv, err := newServer(cfg, logger)
@@ -150,6 +154,7 @@ func main() {
 	}
 
 	if err := srv.waitUntilReady(); err != nil {
+		_ = srv.abortChild(err)
 		logger.Fatal(err)
 	}
 	srv.emitReady()
@@ -211,8 +216,8 @@ func parseFlags() config {
 	flag.Var(&cfg.fdNames, "fdname", "activation fd name, may be repeated")
 	flag.Parse()
 
-	if cfg.readyFD != 1 && cfg.readyFD != 2 {
-		fmt.Fprintln(os.Stderr, "-ready-fd must be 1 or 2")
+	if cfg.readyFD < 1 {
+		fmt.Fprintln(os.Stderr, "-ready-fd must be a positive descriptor")
 		os.Exit(2)
 	}
 	if cfg.startNow && cfg.command == "" {
@@ -643,6 +648,18 @@ func (s *server) openNotifySocket() error {
 	if err != nil {
 		return fmt.Errorf("listen notify socket: %w", err)
 	}
+	raw, err := conn.SyscallConn()
+	if err != nil {
+		conn.Close()
+		return fmt.Errorf("access notify socket: %w", err)
+	}
+	var credentialErr error
+	if err = raw.Control(func(fd uintptr) {
+		credentialErr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_PASSCRED, 1)
+	}); err != nil || credentialErr != nil {
+		conn.Close()
+		return fmt.Errorf("enable notify credentials: %w", errors.Join(err, credentialErr))
+	}
 	if err := s.ensureNotifySocketOwnership(s.cfg.notifyPath); err != nil {
 		conn.Close()
 		return err
@@ -652,7 +669,9 @@ func (s *server) openNotifySocket() error {
 }
 
 func (s *server) ensureNotifySocketOwnership(path string) error {
-	if err := os.Chmod(path, 0o660); err != nil {
+	// Backends may drop privileges themselves before notifying (e.g. chronyd).
+	// Authenticate each datagram by its kernel-supplied PID, not its current UID.
+	if err := os.Chmod(path, 0o666); err != nil {
 		return fmt.Errorf("chmod notify socket: %w", err)
 	}
 	if err := applySocketOwnership(path, s.cfg.socketUser, s.cfg.socketGroup); err != nil {
@@ -695,8 +714,10 @@ func (s *server) startChild() error {
 	if s.cfg.verbose {
 		s.logger.Printf("starting backend: %s", s.cfg.command)
 	}
+	// A fast child can notify before Start returns. Publish its PID under the same
+	// lock used by sender authentication, before queued datagrams are evaluated.
+	s.mu.Lock()
 	if err := cmd.Start(); err != nil {
-		s.mu.Lock()
 		s.cmdDone = nil
 		s.childReady = nil
 		s.childState = "idle"
@@ -707,7 +728,6 @@ func (s *server) startChild() error {
 	}
 	s.debug.event("notifyd.exec-child", map[string]any{"service": s.cfg.serviceName, "service_type": s.cfg.serviceType, "pid": cmd.Process.Pid, "command": s.cfg.command, "user_mode": s.cfg.userMode})
 
-	s.mu.Lock()
 	s.cmd = cmd
 	s.mainPID = cmd.Process.Pid
 	s.mu.Unlock()
@@ -716,7 +736,9 @@ func (s *server) startChild() error {
 	if !strings.EqualFold(s.cfg.serviceType, "notify") {
 		s.markChildReady(seq)
 	}
-	go s.monitorChildStartup(seq, ready, cmdDone)
+	if !s.cfg.startNow {
+		go s.monitorChildStartup(seq, ready, cmdDone)
+	}
 	go func() {
 		err := cmd.Wait()
 		s.mu.Lock()
@@ -825,6 +847,10 @@ func (s *server) waitForReady(seq uint64, ready <-chan struct{}, cmdDone <-chan 
 }
 
 func (s *server) emitReady() {
+	if s.cfg.readyFD >= 3 {
+		_, _ = syscall.Write(s.cfg.readyFD, []byte("\n"))
+		return
+	}
 	fd := os.Stdout
 	if s.cfg.readyFD == 2 {
 		fd = os.Stderr
@@ -834,14 +860,19 @@ func (s *server) emitReady() {
 
 func (s *server) readNotify() {
 	buf := make([]byte, 4096)
+	oob := make([]byte, unix.CmsgSpace(unix.SizeofUcred)+unix.CmsgSpace(16*4))
 	for {
-		n, _, err := s.notifyConn.ReadFromUnix(buf)
+		n, oobn, flags, _, err := s.notifyConn.ReadMsgUnix(buf, oob)
 		if err != nil {
 			if errors.Is(err, net.ErrClosed) {
 				return
 			}
 			s.logger.Printf("notify socket read error: %v", err)
 			return
+		}
+		credentials := notifyCredentials(oob[:oobn])
+		if flags&(unix.MSG_TRUNC|unix.MSG_CTRUNC) != 0 || credentials == nil || !s.ownsNotifyPID(int(credentials.Pid)) {
+			continue
 		}
 		payload := string(buf[:n])
 		for _, line := range strings.Split(payload, "\n") {
@@ -854,6 +885,52 @@ func (s *server) readNotify() {
 	}
 }
 
+func notifyCredentials(oob []byte) *unix.Ucred {
+	messages, err := unix.ParseSocketControlMessage(oob)
+	if err != nil {
+		return nil
+	}
+	var credentials *unix.Ucred
+	for _, message := range messages {
+		if message.Header.Level != unix.SOL_SOCKET {
+			continue
+		}
+		switch message.Header.Type {
+		case unix.SCM_CREDENTIALS:
+			credentials, _ = unix.ParseUnixCredentials(&message)
+		case unix.SCM_RIGHTS:
+			// FDSTORE is not supported; never leak received descriptors, even on
+			// rejected or truncated notifications.
+			fds, _ := unix.ParseUnixRights(&message)
+			for _, fd := range fds {
+				_ = unix.Close(fd)
+			}
+		}
+	}
+	return credentials
+}
+
+func (s *server) ownsNotifyPID(pid int) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cmd == nil || s.cmd.Process == nil || pid <= 0 {
+		return false
+	}
+	// Helpers are allowed only while their ancestry still belongs to the active
+	// backend. UID checks would reject legitimate setuid/privilege-dropping daemons.
+	for depth := 0; pid > 1 && depth < 64; depth++ {
+		if pid == s.cmd.Process.Pid || pid == s.mainPID {
+			return true
+		}
+		stat, err := procinfo.ReadStat("/proc", pid)
+		if err != nil || stat.PPID == pid {
+			return false
+		}
+		pid = stat.PPID
+	}
+	return false
+}
+
 func (s *server) handleNotifyLine(line string) {
 	switch {
 	case line == "READY=1":
@@ -862,22 +939,30 @@ func (s *server) handleNotifyLine(line string) {
 		}
 		s.markChildReady(atomic.LoadUint64(&s.childReadyN))
 	case strings.HasPrefix(line, "STATUS="):
-		s.status = strings.TrimPrefix(line, "STATUS=")
-		s.logger.Printf("status: %s", s.status)
+		status := strings.TrimPrefix(line, "STATUS=")
+		s.mu.Lock()
+		s.status = status
+		s.mu.Unlock()
+		s.logger.Printf("status: %s", status)
 		s.writeState()
 	case strings.HasPrefix(line, "MAINPID="):
 		pidValue := strings.TrimPrefix(line, "MAINPID=")
 		pid, err := strconv.Atoi(pidValue)
-		if err != nil {
+		if err != nil || !s.ownsNotifyPID(pid) {
 			s.logger.Printf("invalid mainpid: %s", pidValue)
 			return
 		}
+		s.mu.Lock()
 		s.mainPID = pid
-		s.logger.Printf("mainpid: %d", s.mainPID)
+		s.mu.Unlock()
+		s.logger.Printf("mainpid: %d", pid)
 		s.writeState()
 	case strings.HasPrefix(line, "ERRNO="):
-		s.failureText = strings.TrimPrefix(line, "ERRNO=")
-		s.logger.Printf("notify errno: %s", s.failureText)
+		failure := strings.TrimPrefix(line, "ERRNO=")
+		s.mu.Lock()
+		s.failureText = failure
+		s.mu.Unlock()
+		s.logger.Printf("notify errno: %s", failure)
 		s.writeState()
 	case line == "RELOADING=1":
 		s.setPhase("reloading")

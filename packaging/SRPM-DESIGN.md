@@ -140,8 +140,8 @@ code:
 - `dbus-common` for the system D-Bus activation directory
 
 The package requires both `servicectl-dinit` and `servicectl-s6`: runtime
-control invokes `dinit`/`dinitctl`, while persistent enablement and group
-orchestration invoke the s6 and s6-rc command sets.
+control uses Dinit's native control socket protocol, while persistent enablement
+and group orchestration invoke the s6 and s6-rc command sets.
 
 ### `servicectl-dinit`
 

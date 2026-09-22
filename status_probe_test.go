@@ -252,32 +252,6 @@ func TestProbeStatusComponentUsesExactDeclaredNames(t *testing.T) {
 	}
 }
 
-func TestQueryStatusDinitServiceUsesExplicitMode(t *testing.T) {
-	tests := []struct {
-		mode     string
-		wantArgs []string
-	}{
-		{mode: visionapi.ModeSystem, wantArgs: []string{"status", "demo"}},
-		{mode: visionapi.ModeUser, wantArgs: []string{"--user", "status", "demo"}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.mode, func(t *testing.T) {
-			got, err := queryStatusDinitServiceWithCommand(context.Background(), tt.mode, "demo", func(_ context.Context, name string, args ...string) ([]byte, error) {
-				if name != "dinitctl" || !reflect.DeepEqual(args, tt.wantArgs) {
-					t.Fatalf("command = %q %#v, want dinitctl %#v", name, args, tt.wantArgs)
-				}
-				return []byte("State: STARTED\nProcess ID: 42\n"), nil
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got.State != "active" || got.PID != 42 || !got.Healthy {
-				t.Fatalf("observation = %#v", got)
-			}
-		})
-	}
-}
-
 func TestProbeDoesNotInventParticipants(t *testing.T) {
 	manifest := testStatusManifest("demo.service", "system")
 	manifest.Components = append(manifest.Components, probeComponent("sysvisiond", "sysvisiond", "system"))

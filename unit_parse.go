@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -42,6 +43,7 @@ type Unit struct {
 	BindsTo          []string
 	PartOf           []string
 	CmdExtraAppend   []string
+	ReadyFD          int
 }
 
 type SocketUnit struct {
@@ -184,6 +186,12 @@ func parseSystemdUnit(name string) (*Unit, error) {
 					unit.Type = v
 				case "BusName":
 					unit.BusName = v
+				case "X-Servicectl-ReadyFD":
+					fd, err := strconv.Atoi(v)
+					if err != nil || fd < 3 || fd > 1023 {
+						return nil, fmt.Errorf("invalid X-Servicectl-ReadyFD %q", v)
+					}
+					unit.ReadyFD = fd
 				case "RemainAfterExit":
 					unit.RemainAfterExit = strings.EqualFold(v, "yes") || strings.EqualFold(v, "true") || v == "1"
 				case "ExecStart":
@@ -232,6 +240,9 @@ func parseSystemdUnit(name string) (*Unit, error) {
 	}
 
 	applyUnitExtra(unit)
+	if unit.ReadyFD != 0 && (!strings.EqualFold(unit.Type, "notify") || unit.BusName != "") {
+		return nil, fmt.Errorf("native FD readiness requires Type=notify without BusName")
+	}
 
 	return unit, nil
 }

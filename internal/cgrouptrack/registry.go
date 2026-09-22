@@ -19,6 +19,7 @@ const MaxRegistryBytes = 1 << 20
 type Registry struct {
 	Version int          `json:"version"`
 	Units   []UnitRecord `json:"units"`
+	Native  []UnitKey    `json:"native,omitempty"`
 }
 
 type UnitRecord struct {
@@ -155,6 +156,11 @@ func WriteRegistry(path string, registry Registry) error {
 func validateRegistry(registry Registry) error {
 	if registry.Version != 1 {
 		return fmt.Errorf("unsupported registry version %d", registry.Version)
+	}
+	for _, key := range registry.Native {
+		if err := key.Validate(); err != nil {
+			return err
+		}
 	}
 	seen := make(map[UnitKey]struct{}, len(registry.Units))
 	for _, record := range registry.Units {

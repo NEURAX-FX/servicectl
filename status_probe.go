@@ -13,6 +13,7 @@ import (
 
 	"servicectl/internal/cgrouptrack"
 	"servicectl/internal/dbusmanager"
+	"servicectl/internal/dinit"
 	"servicectl/internal/statusview"
 	"servicectl/internal/visionapi"
 )
@@ -313,30 +314,18 @@ func queryStatusS6Service(ctx context.Context, serviceName string) (statusRuntim
 }
 
 func queryStatusDinitService(ctx context.Context, mode, serviceName string) (statusRuntimeObservation, error) {
-	return queryStatusDinitServiceWithCommand(ctx, mode, serviceName, func(ctx context.Context, name string, args ...string) ([]byte, error) {
-		return exec.CommandContext(ctx, name, args...).CombinedOutput()
-	})
-}
-
-func queryStatusDinitServiceWithCommand(ctx context.Context, mode, serviceName string, command func(context.Context, string, ...string) ([]byte, error)) (statusRuntimeObservation, error) {
 	if strings.TrimSpace(serviceName) == "" {
 		return statusRuntimeObservation{}, os.ErrNotExist
 	}
-	args := []string{"status", serviceName}
-	if strings.EqualFold(strings.TrimSpace(mode), visionapi.ModeUser) {
-		args = append([]string{"--user"}, args...)
-	}
-	output, err := command(ctx, "dinitctl", args...)
-	if err != nil && len(output) == 0 {
+	r, err := nativeDinitCall(ctx, mode, dinit.Request{Action: "status", Name: serviceName})
+	if err != nil {
 		return statusRuntimeObservation{}, err
 	}
-	status := parseDinitStatus(string(output))
-	state := statusValue(status, "State")
-	if strings.EqualFold(state, "NOT LOADED") || state == "" {
-		return statusRuntimeObservation{}, os.ErrNotExist
+	state := snapshotRuntimeState(r.Status.State.String())
+	if r.Status.Failed() {
+		state = "failed"
 	}
-	healthy := state == "STARTED"
-	return statusRuntimeObservation{State: snapshotRuntimeState(state), PID: parseStatusPID(statusValue(status, "Process ID")), Healthy: healthy}, nil
+	return statusRuntimeObservation{State: state, PID: r.Status.PID, Healthy: r.Status.State == dinit.Started}, nil
 }
 
 func queryStatusDBusOwner(ctx context.Context, mode, busName string) (string, error) {

@@ -44,7 +44,7 @@ func managedServiceModeForUnit(unit *Unit, socketUnit *SocketUnit) managedServic
 	if socketUnit != nil {
 		return managedSocketd
 	}
-	if unit != nil && strings.EqualFold(unit.Type, "notify") {
+	if unit != nil && strings.EqualFold(unit.Type, "notify") && unit.ReadyFD == 0 {
 		return managedNotifyd
 	}
 	return managedDirect
@@ -338,6 +338,9 @@ func (u *Unit) GenerateDinit() string {
 		dType = "scripted"
 	}
 	sb.WriteString(fmt.Sprintf("type = %s\n", dType))
+	if u.ReadyFD >= 3 {
+		sb.WriteString(fmt.Sprintf("ready-notification = pipefd:%d\n", u.ReadyFD))
+	}
 	if dType == "bgprocess" && u.PIDFile != "" {
 		sb.WriteString(fmt.Sprintf("pid-file = %s\n", u.PIDFile))
 	}
@@ -346,6 +349,9 @@ func (u *Unit) GenerateDinit() string {
 	}
 	allEnvs := mergedServiceEnv(u)
 	finalCmd := compileExecStart(u, allEnvs)
+	if u.ReadyFD >= 3 {
+		finalCmd = "/usr/bin/env -u NOTIFY_SOCKET " + finalCmd
+	}
 	envPrefixMap := make(map[string]string, len(allEnvs))
 	for k, v := range allEnvs {
 		envPrefixMap[k] = v
@@ -385,6 +391,7 @@ func (u *Unit) GenerateNotifydDinit(mode managedServiceMode, socketUnit *SocketU
 		sb.WriteString(fmt.Sprintf("# %s\n", u.Description))
 	}
 	sb.WriteString("type = process\n")
+	sb.WriteString("ready-notification = pipefd:3\nstart-timeout = 0\n")
 	if u.User != "" {
 		sb.WriteString(fmt.Sprintf("run-as = %s\n", u.User))
 	}
@@ -408,6 +415,7 @@ func (u *Unit) GenerateNotifydDinit(mode managedServiceMode, socketUnit *SocketU
 	if mode == managedDbusd {
 		args = []string{notifydBinaryPath(), "-service", dinitArg(u.Name), "-service-type", dinitArg(strings.ToLower(u.Type)), "-bus-name", dinitArg(u.BusName), "-control-path", dinitArg(managedControlPath(u.Name, mode)), "-command", dinitArg(backendCmd), "-state-file", dinitArg(notifydStatePath(u.Name, mode))}
 	}
+	args = append(args, "-ready-fd", "3")
 	if userMode() {
 		args = append(args, "-user")
 	}
@@ -548,10 +556,9 @@ func installGeneratedService(serviceName string, content []byte, opts installOpt
 	}
 	if isDinitServiceKnown(serviceName) && (changed || linkChanged) {
 		if opts.freshLoadOnChange[serviceName] {
-			runDinitctl("unload", "--ignore-unstarted", serviceName)
-			return true
+			return runDinitctl("unload", "--ignore-unstarted", serviceName)
 		}
-		runDinitctl("reload", serviceName)
+		return runDinitctl("reload", serviceName)
 	}
 	return true
 }
@@ -645,9 +652,6 @@ func obsoleteManagedServiceNames(unitName string, currentMode managedServiceMode
 }
 
 func cleanupObsoleteManagedServices(unitName string, currentMode managedServiceMode) {
-	if currentMode == managedDirect {
-		return
-	}
 	for _, serviceName := range obsoleteManagedServiceNames(unitName, currentMode) {
 		if isDinitServiceKnown(serviceName) {
 			runDinitctl("stop", serviceName)
@@ -658,20 +662,24 @@ func cleanupObsoleteManagedServices(unitName string, currentMode managedServiceM
 	}
 }
 
-func recursiveInstall(unitName string, visited map[string]bool, opts installOptions) {
+func recursiveInstall(unitName string, visited map[string]bool, opts installOptions) bool {
 	cleanName := strings.TrimSuffix(unitName, ".service")
 	if visited[cleanName] {
-		return
+		return true
 	}
 	visited[cleanName] = true
 	unit, err := parseSystemdUnit(cleanName)
 	if err != nil {
-		return
+		return false
 	}
 	socketUnit, socketErr := parseOptionalSocketUnit(cleanName)
 	if socketErr != nil {
 		fmt.Printf("Error parsing socket for %s: %v\n", cleanName, socketErr)
-		return
+		return false
+	}
+	if unit.ReadyFD != 0 && socketUnit != nil {
+		fmt.Printf("Native FD readiness for %s cannot be combined with socket activation\n", cleanName)
+		return false
 	}
 	mode := managedServiceModeForUnit(unit, socketUnit)
 	serviceName := managedServiceName(cleanName, mode)
@@ -681,12 +689,14 @@ func recursiveInstall(unitName string, visited map[string]bool, opts installOpti
 		cleanDep := strings.TrimSuffix(resolveUnitAlias(d), ".service")
 		if externalManagedStateFunc(cleanDep) {
 			if !installExternalManagedPlaceholder(cleanDep, opts) {
-				return
+				return false
 			}
 			continue
 		}
 		if _, ok := resolvedDependencyServiceName(d); ok {
-			recursiveInstall(cleanDep, visited, opts)
+			if !recursiveInstall(cleanDep, visited, opts) {
+				return false
+			}
 		}
 	}
 	_ = os.MkdirAll(config.DinitGenDir, 0755)
@@ -694,7 +704,7 @@ func recursiveInstall(unitName string, visited map[string]bool, opts installOpti
 	if mode != managedDirect {
 		if err := ensureManagedRuntimeDir(cleanName, mode, unit); err != nil {
 			fmt.Printf("Error creating runtime dir for %s: %v\n", cleanName, err)
-			return
+			return false
 		}
 	}
 	if unit.PIDFile != "" {
@@ -713,22 +723,31 @@ func recursiveInstall(unitName string, visited map[string]bool, opts installOpti
 	} else {
 		content = []byte(unit.GenerateDinit())
 	}
+	groupPath, groupErr := prepareNativeCgroup(cleanName)
+	if groupErr != nil {
+		fmt.Printf("Error preparing native cgroup for %s: %v\n", cleanName, groupErr)
+		return false
+	}
+	if groupPath != "" {
+		content = append(content, []byte("run-in-cgroup = "+dinitArg(groupPath)+"\n")...)
+	}
 	if !installGeneratedService(serviceName, content, opts) {
-		return
+		return false
 	}
 	if strings.TrimSpace(unit.BusName) != "" && !installDBusActivationFile(unit) {
-		return
+		return false
 	}
 	loggerName := loggerServiceName(serviceName)
 	spillDir := loggerSpillDir(loggerName)
 	if err := ensureLoggerSpillDir(spillDir, unit); err != nil {
 		fmt.Printf("Error creating logger spill dir for %s: %v\n", cleanName, err)
-		return
+		return false
 	}
 	if !installGeneratedService(loggerName, []byte(generateLoggerDinit(serviceName, cleanName, unit)), opts) {
-		return
+		return false
 	}
 	if knownToDinit && !isDinitServiceKnown(serviceName) {
 		runDinitctl("reload", serviceName)
 	}
+	return true
 }

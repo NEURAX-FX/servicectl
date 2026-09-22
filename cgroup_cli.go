@@ -33,7 +33,7 @@ func cgroupCommand(args []string) int {
 	request, err := parseCgroupCommand(args, userMode(), uid)
 	if err != nil {
 		fmt.Println(err)
-		fmt.Println("Usage: servicectl [--user] cgroup <status|list|inspect|pids|attach> [UNIT] [PID]")
+		fmt.Println("Usage: servicectl [--user] cgroup <status|list|inspect|pids|attach|release> [UNIT] [PID]")
 		return 1
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -86,6 +86,12 @@ func parseCgroupCommand(args []string, user bool, uid uint32) (cgrouptrack.Reque
 			return cgrouptrack.Request{}, errors.New("pids requires one unit")
 		}
 		request.Operation = cgrouptrack.OpListPIDs
+		request.Unit = canonicalCgroupUnit(args[1])
+	case "release":
+		if len(args) != 2 {
+			return cgrouptrack.Request{}, errors.New("release requires one removed unit")
+		}
+		request.Operation = cgrouptrack.OpRelease
 		request.Unit = canonicalCgroupUnit(args[1])
 	case "attach":
 		if len(args) != 3 {
@@ -154,6 +160,8 @@ func printCgroupResponse(output io.Writer, request cgrouptrack.Request, response
 		return errors.New("cgroup daemon request failed")
 	}
 	switch request.Operation {
+	case cgrouptrack.OpRelease:
+		fmt.Fprintln(output, "Released native cgroup reservation for", request.Unit)
 	case cgrouptrack.OpStatus:
 		if response.Status == nil {
 			return errors.New("cgroup daemon returned no status")

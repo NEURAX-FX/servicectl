@@ -140,15 +140,11 @@ if [[ "$SYSTEM_MODE" -eq 1 || "$INSTALL_SYSTEM_COPY" -eq 1 ]]; then
     -e 's#/usr/libexec/servicectl/sys-dbusd-daemon-helper#/usr/local/libexec/servicectl/sys-dbusd-daemon-helper#' \
     -e 's#/usr/bin/servicectl#/usr/local/bin/servicectl#g' \
     /usr/lib/systemd/system/sys-dbusd.service
-	if command -v dinitctl >/dev/null 2>&1; then
-		dinitctl stop sys-dbusd >/dev/null 2>&1 || true
-		dinitctl unload sys-dbusd >/dev/null 2>&1 || true
-	fi
+	"$SYSTEM_BINDIR/servicectl" dinit stop sys-dbusd >/dev/null 2>&1 || true
+	"$SYSTEM_BINDIR/servicectl" dinit unload sys-dbusd >/dev/null 2>&1 || true
 	rm -f /etc/dinit.d/sys-dbusd
-	if command -v dinitctl >/dev/null 2>&1; then
-		dinitctl stop sys-cgroupd >/dev/null 2>&1 || true
-		dinitctl unload sys-cgroupd >/dev/null 2>&1 || true
-	fi
+	"$SYSTEM_BINDIR/servicectl" dinit stop sys-cgroupd >/dev/null 2>&1 || true
+	"$SYSTEM_BINDIR/servicectl" dinit unload sys-cgroupd >/dev/null 2>&1 || true
 	rm -f /etc/dinit.d/sys-cgroupd
 	install -d -m 0700 /run/servicectl/sys-cgroupd
 	"$SYSTEM_BINDIR/servicectl" ensure-s6

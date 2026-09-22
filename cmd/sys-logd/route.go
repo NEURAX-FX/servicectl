@@ -2,21 +2,20 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"flag"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"regexp"
+	"servicectl/internal/dinit"
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 const systemDinitSocketPath = "/run/dinitctl"
-
-var dinitProcessIDPattern = regexp.MustCompile(`(?m)^\s*Process ID:\s*([0-9]+)\s*$`)
 
 type peerCredentials struct {
 	PID int
@@ -267,17 +266,14 @@ func validatePeerOwnedPath(path string, uid uint32) error {
 }
 
 func queryDinitServicePID(socketPath, service string) (int, error) {
-	output, err := exec.Command("dinitctl", "--socket-path", socketPath, "status", service).CombinedOutput()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	status, err := dinit.QuerySocket(ctx, socketPath, service)
 	if err != nil {
-		return 0, fmt.Errorf("dinitctl status failed: %w: %s", err, strings.TrimSpace(string(output)))
+		return 0, err
 	}
-	match := dinitProcessIDPattern.FindSubmatch(output)
-	if len(match) != 2 {
-		return 0, fmt.Errorf("dinitctl status did not report a process ID")
+	if status.PID <= 0 {
+		return 0, fmt.Errorf("Dinit service %s has no process", service)
 	}
-	pid, err := strconv.Atoi(string(match[1]))
-	if err != nil || pid <= 0 {
-		return 0, fmt.Errorf("invalid dinit process ID %q", match[1])
-	}
-	return pid, nil
+	return status.PID, nil
 }

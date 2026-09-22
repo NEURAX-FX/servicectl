@@ -4,9 +4,10 @@ set -euo pipefail
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 INSTALL_SCRIPT="$ROOT/scripts/install.sh"
 
-grep -Fq 'dbusActivationHelperPath=/usr/local/libexec/servicectl/sys-dbusd-daemon-helper' "$INSTALL_SCRIPT"
+grep -Fq 'main.dbusActivationHelperPath=/usr/local/libexec/servicectl/sys-dbusd-daemon-helper' "$INSTALL_SCRIPT"
 grep -Fq '<servicehelper>/usr/local/libexec/servicectl/sys-dbusd-daemon-helper</servicehelper>' "$INSTALL_SCRIPT"
-grep -Fq -- '-helper-path /usr/local/libexec/servicectl/sys-dbusd-daemon-helper' "$INSTALL_SCRIPT"
+grep -Fq -- "-e" "$INSTALL_SCRIPT"
+grep -Fq 's#/usr/libexec/servicectl/sys-dbusd-daemon-helper#/usr/local/libexec/servicectl/sys-dbusd-daemon-helper#' "$INSTALL_SCRIPT"
 grep -Fq 'build_and_install sys-cgroupd "$ROOT/cmd/sys-cgroupd"' "$INSTALL_SCRIPT"
 grep -Fq 'rm -f /etc/dinit.d/sys-cgroupd' "$INSTALL_SCRIPT"
 grep -Fq '"$SYSTEM_BINDIR/servicectl" ensure-s6' "$INSTALL_SCRIPT"
@@ -19,7 +20,14 @@ if grep -Eq 'install .*dinit\.d/sys-cgroupd|%config.*dinit\.d/sys-cgroupd' "$ROO
 	printf '%s\n' 'RPM must not package a dinit sys-cgroupd service' >&2
 	exit 1
 fi
-grep -Fq 'dinitctl stop sys-cgroupd' "$ROOT/packaging/servicectl-stack.spec"
+grep -Fq '"$SYSTEM_BINDIR/servicectl" dinit stop sys-cgroupd' "$INSTALL_SCRIPT"
+grep -Fq '"$SYSTEM_BINDIR/servicectl" dinit unload sys-cgroupd' "$INSTALL_SCRIPT"
+grep -Fq '"$SYSTEM_BINDIR/servicectl" dinit stop sys-dbusd' "$INSTALL_SCRIPT"
+grep -Fq '"$SYSTEM_BINDIR/servicectl" dinit unload sys-dbusd' "$INSTALL_SCRIPT"
+grep -Fq '%{_bindir}/servicectl dinit stop sys-cgroupd' "$ROOT/packaging/servicectl-stack.spec"
+grep -Fq '%{_bindir}/servicectl dinit unload sys-cgroupd' "$ROOT/packaging/servicectl-stack.spec"
+grep -Fq '%{_bindir}/servicectl dinit stop sys-dbusd' "$ROOT/packaging/servicectl-stack.spec"
+grep -Fq '%{_bindir}/servicectl dinit unload sys-dbusd' "$ROOT/packaging/servicectl-stack.spec"
 grep -Fq 'rm -f %{_sysconfdir}/dinit.d/sys-cgroupd' "$ROOT/packaging/servicectl-stack.spec"
 grep -Fq '%{_bindir}/servicectl ensure-s6' "$ROOT/packaging/servicectl-stack.spec"
 grep -Fq '/run/servicectl/sys-cgroupd' "$ROOT/packaging/servicectl.tmpfiles"

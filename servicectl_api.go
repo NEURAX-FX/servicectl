@@ -21,6 +21,7 @@ import (
 	"unicode"
 
 	"servicectl/internal/cgrouptrack"
+	"servicectl/internal/dinit"
 	"servicectl/internal/statusview"
 	"servicectl/internal/util"
 	"servicectl/internal/visionapi"
@@ -34,6 +35,7 @@ type servicectlPlaneServer struct {
 	mode                   string
 	cfg                    Config
 	hub                    *servicectlEventHub
+	dinit                  *dinit.Controller
 	mu                     sync.Mutex
 	queryUnitLists         func(string) (visionapi.UnitListsResponse, error)
 	queryUnitGroups        func(string, string) (visionapi.UnitGroupsResponse, error)
@@ -610,6 +612,7 @@ func newServicectlPlaneServer(mode string, hub *servicectlEventHub) servicectlPl
 		mode:                   visionapi.PlaneForMode(mode).Mode,
 		cfg:                    buildConfig(strings.EqualFold(strings.TrimSpace(mode), visionapi.ModeUser)),
 		hub:                    hub,
+		dinit:                  &dinit.Controller{Path: dinit.SocketPath(strings.EqualFold(mode, visionapi.ModeUser))},
 		queryUnitLists:         propertyUnitListsForMode,
 		queryUnitGroups:        propertyUnitGroupsForMode,
 		replaceUnitList:        propertyReplaceUnitListForMode,
@@ -625,6 +628,7 @@ func newServicectlPlaneServer(mode string, hub *servicectlEventHub) servicectlPl
 
 func (s *servicectlPlaneServer) handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/dinit", s.serveDinit)
 	mux.HandleFunc("/v1/units", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -969,7 +973,7 @@ func (s *servicectlPlaneServer) serveAPI(notifyReady func()) error {
 	if notifyReady != nil {
 		notifyReady()
 	}
-	server := &http.Server{Handler: s.handler()}
+	server := &http.Server{Handler: s.handler(), ConnContext: dinitPeerContext}
 	if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
 		return err
 	}
@@ -1011,6 +1015,10 @@ func writeServicectlAPIReady(writer io.Writer) error {
 func servicectlAPIServer(readyFD int) int {
 	hub := newServicectlEventHub()
 	server := selectedServicectlPlane(hub)
+	defer server.dinit.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go server.observeDinit(ctx)
 	if err := server.refreshPropertyLists(); err != nil {
 		fmt.Println(oneLineError("initialize servicectl unit lists", err))
 		return 1

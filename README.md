@@ -20,7 +20,7 @@ can be done accurately.
 | Status | Builds a topology-first view from Dinit, s6, cgroup, D-Bus, observation, and control-plane evidence. |
 | State APIs | Exposes local Unix-socket query, event, property, group, and snapshot APIs through `servicectl-api`, `sysvisiond`, and `sys-propertyd`. |
 | Activation | Supports notify, socket, and strict D-Bus activation paths through dedicated helper daemons. |
-| Cgroups | Tracks ready service process trees in cgroup v2 leaves without taking ownership of resource-controller policy. |
+| Cgroups | Reserves cgroup v2 leaves for Dinit's pre-exec placement and verifies membership without taking ownership of resource-controller policy. |
 | Logging | Runs per-unit `sys-logd` workers through a root system broker and emits standard journald object-unit fields, with syslog fallback. |
 | Modes | Keeps system and user service planes, runtime sockets, Dinit instances, and service identities separate. |
 | Compatibility | Accepts virtual `.target` inputs and can optionally expose a minimal `org.freedesktop.systemd1` API through the separate `systemd1-broker` project. |
@@ -30,7 +30,7 @@ can be done accurately.
 The source installation expects a Linux host with:
 
 - Go 1.22 or newer
-- Dinit and `dinitctl`
+- Dinit with control protocol v5 or newer (`dinitctl` is optional for manual administration)
 - s6 and s6-rc
 - systemd-style unit files in the standard system or user unit paths
 - a writable runtime directory for the selected mode
@@ -122,8 +122,17 @@ servicectl is-failed demo.service
 servicectl is-enabled demo.service
 ```
 
-Use `servicectl dinit ...` only when raw Dinit output or an operation outside
-the normal servicectl surface is required.
+`servicectl dinit ...` uses the native Dinit control protocol, not an executed
+`dinitctl`. Supported operations are `list`, `status`, `is-started`, `is-failed`,
+`start`, `stop`, `restart`, `wake`, `release`, `reload`, `unload`, `unpin`,
+`signal`, `setenv`, and `unsetenv`. It is not an arbitrary CLI passthrough.
+
+The per-plane servicectl API owns the persistent Dinit connection and service
+handles. Native events trigger snapshot updates; a two-second reconciliation
+also detects PID changes during Dinit smooth recovery, which emits no state
+transition. Reload and unload share that connection with the observer.
+Bootstrap uses a short-lived native connection only when the API socket is
+absent; uncertain commands are never automatically replayed.
 
 ## Enablement, Groups, and Virtual Targets
 
@@ -239,10 +248,25 @@ runtime or unit restart.
 
 ## Cgroup v2 Tracking
 
-`sys-cgroupd` tracks ready servicectl-managed services in dedicated cgroup v2
-leaves. It moves the MainPID first and then descendants visible at migration
-time. It does not guess detached processes and it does not configure CPU,
-memory, IO, pids, cpuset, freeze, or kill policy.
+When `sys-cgroupd` is available, installation reserves a leaf before writing
+`run-in-cgroup` into the generated workload definition. Dinit enters that leaf
+before executing either the workload or its `sys-notifyd` wrapper; descendants
+inherit membership. The daemon verifies native membership rather than moving
+the ready process tree afterward. Previously generated, unreserved services
+retain the legacy reconciliation path until regenerated.
+
+Reservations survive daemon restarts through its registry and prevent empty
+groups from being reclaimed between service executions. After stopping,
+unloading, and removing a service definition, use `servicectl cgroup release
+UNIT` to release its empty reservation. Populated groups cannot be released.
+An absent optional cgroup daemon permits installation without native placement;
+an available daemon rejecting preparation causes installation to fail.
+
+This is membership infrastructure, not CPU, memory, IO, pids, cpuset, freeze,
+or whole-cgroup kill policy. Non-root user Dinit instances need delegation and
+must already reside inside their UID subtree; the daemon never grants access
+to the system plane or another UID. Root's user plane remains separate from
+the system plane. Native leaves must be visible below `/sys/fs/cgroup`.
 
 ```bash
 servicectl cgroup status demo.service
@@ -319,6 +343,36 @@ systemd unit files
 System and user modes have distinct runtime sockets and Dinit instances. The
 s6 source graph is shared, but user infrastructure service names are
 UID-qualified.
+
+`sys-notifyd` accepts notifications after a backend drops privileges itself
+(for example, chronyd). Its notification socket permits writes across UIDs;
+each datagram must carry kernel-provided process credentials identifying the
+active backend or a still-identifiable descendant. Unrelated processes cannot
+set readiness, watchdog state, or `MAINPID`. A replacement `MAINPID` must also
+belong to that backend. This does not implement the full systemd `NotifyAccess=`
+or `FDSTORE=` interface.
+
+Generated wrappers now use `ready-notification = pipefd:3`; `sys-notifyd` writes
+to that inherited descriptor only after startup readiness, or after arming a
+lazy socket/D-Bus service. Logging on stdout cannot accidentally mark it ready.
+For lazy services, Dinit readiness means the activation listener is ready;
+the backend's own lifecycle remains available through sysvision.
+
+Programs with native FD readiness can opt out of the notify wrapper:
+
+```ini
+[Service]
+Type=notify
+X-Servicectl-ReadyFD=3
+ExecStart=/usr/sbin/chronyd -n -N 3
+```
+
+The program must actually notify on the selected descriptor (3 through 1023).
+The generated direct command unsets `NOTIFY_SOCKET`; this mode requires no
+`BusName=` and no `.socket` activation unit. Other notify services retain the
+credential-checked sd_notify bridge. `sys-dbusd` no longer accepts the obsolete
+`-dinitctl-path` option; update locally customized launch definitions as well
+as binaries when deploying.
 
 ## systemd Interoperability
 
@@ -485,6 +539,7 @@ sudo bash scripts/test-cgroupd-integration.sh \
 - `internal/visionapi/`: runtime paths, event types, snapshots, and status contracts
 - `internal/statusview/`: status topology model and health derivation
 - `internal/cgrouptrack/`: cgroup protocol, identity, membership, and recovery
+- `internal/dinit/`: native wire protocol, shared control ownership, and API transport
 - `internal/dbusactivation/`: D-Bus route resolution and activation frontend
 - `scripts/`: installation and regression/integration tests
 - `packaging/`: Fedora spec, SRPM tooling, units, tmpfiles, and package design

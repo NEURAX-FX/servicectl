@@ -54,7 +54,7 @@ S6 orchestration commands:
 	  is-enabled    Report enabled state for a service, group:<name>, or *.target
 
 Low-level / internal:
-  dinit         Raw passthrough to dinit/dinitctl
+  dinit         Native Dinit control operations
   serve-api     Start the local servicectl query/event API socket
   activate-dbus Internal D-Bus activation entrypoint
   dbus-activation Configure the sys-dbusd activation frontend
@@ -76,44 +76,15 @@ Local API sockets:
 Notes:
 	  enable/disable/is-enabled require the s6 backend only for real service units
 	  serve-api and sysvisiond are intended for local tooling and orchestrators
-	  use 'servicectl dinit ...' when you want raw dinit output`)
-}
-
-func parseDinitStatus(output string) map[string]string {
-	status := make(map[string]string)
-	for _, line := range strings.Split(output, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		parts := strings.SplitN(line, ":", 2)
-		if len(parts) != 2 {
-			continue
-		}
-		status[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
-	}
-	return status
-}
-
-func dinitctlOutput(args ...string) (string, int, error) {
-	cmd := dinitctlCommand(args...)
-	out, err := cmd.CombinedOutput()
-	text := strings.TrimSpace(string(out))
-	if err == nil {
-		return text, 0, nil
-	}
-	if exitErr, ok := err.(*exec.ExitError); ok {
-		return text, exitErr.ExitCode(), err
-	}
-	return text, 1, err
+	  use 'servicectl dinit ...' for native Dinit control operations`)
 }
 
 func dinitStatus(unitName string) map[string]string {
-	out, err := dinitctlCommand("status", unitName).CombinedOutput()
-	if err != nil && len(out) == 0 {
+	status, err := nativeDinitStatus(config.Mode, unitName)
+	if err != nil {
 		return nil
 	}
-	return parseDinitStatus(string(out))
+	return nativeStatusMap(status)
 }
 
 func parseKeyValueFile(path string) map[string]string {
@@ -259,12 +230,11 @@ func printStatus(unitName string) {
 			runtimeState = parseKeyValueFile(notifydStatePath(unitName, mode))
 		}
 	}
-	out, statusErr := dinitctlCommand("status", dinitName).CombinedOutput()
-	if err != nil && statusErr != nil {
+	status := dinitStatus(dinitName)
+	if err != nil && status == nil {
 		fmt.Printf("Unit %s.service could not be found.\n", unitName)
 		return
 	}
-	status := parseDinitStatus(string(out))
 
 	description := unitName
 	loadedPath := filepath.Join(config.DinitGenDir, dinitName)
@@ -289,7 +259,7 @@ func printStatus(unitName string) {
 
 	state := status["State"]
 	if state == "" {
-		if statusErr != nil {
+		if status == nil {
 			state = "NOT LOADED"
 		} else {
 			state = "unknown"
@@ -745,10 +715,8 @@ func isUnitStarted(unitName string) bool {
 }
 
 var isUnitStartedFunc = func(unitName string) bool {
-	cmd := dinitctlCommand("is-started", backendServiceNameForUnit(unitName))
-	cmd.Stdout = nil
-	cmd.Stderr = nil
-	return cmd.Run() == nil
+	status, err := nativeDinitStatus(config.Mode, backendServiceNameForUnit(unitName))
+	return err == nil && status.State.String() == "STARTED"
 }
 
 func stopBackendIfKnown(unitName string) int {
@@ -777,7 +745,9 @@ func restartUnit(unitName string, opts startOptions) int {
 		return code
 	}
 	fmt.Printf("Restarting target: %s\n", unitName)
-	recursiveInstall(unitName, make(map[string]bool), installOptionsForUnit(unitName, true))
+	if !recursiveInstall(unitName, make(map[string]bool), installOptionsForUnit(unitName, true)) {
+		return 1
+	}
 	if !recursiveStart(unitName, make(map[string]bool), opts) {
 		return 1
 	}
@@ -785,7 +755,9 @@ func restartUnit(unitName string, opts startOptions) int {
 		restore := reverseStrings(dependents)
 		fmt.Printf("Restoring dependents: %s\n", strings.Join(restore, ", "))
 		for _, dependent := range restore {
-			recursiveInstall(dependent, make(map[string]bool), installOptionsForUnit(dependent, true))
+			if !recursiveInstall(dependent, make(map[string]bool), installOptionsForUnit(dependent, true)) {
+				return 1
+			}
 			if !recursiveStart(dependent, make(map[string]bool), opts) {
 				return 1
 			}
@@ -942,7 +914,9 @@ func recursiveStart(unitName string, visited map[string]bool, opts startOptions)
 				fmt.Printf("Using external-managed dependency: %s\n", depName)
 				continue
 			}
-			recursiveInstall(depName, make(map[string]bool), installOptionsForUnit(depName, false))
+			if !recursiveInstall(depName, make(map[string]bool), installOptionsForUnit(depName, false)) {
+				return false
+			}
 			if shouldSkipFailedDependency(d) {
 				fmt.Printf("Skipping failed auxiliary dependency: %s\n", depName)
 				continue
@@ -960,7 +934,9 @@ func recursiveStart(unitName string, visited map[string]bool, opts startOptions)
 				fmt.Printf("Using external-managed degradable dependency: %s\n", depName)
 				continue
 			}
-			recursiveInstall(depName, make(map[string]bool), installOptionsForUnit(depName, false))
+			if !recursiveInstall(depName, make(map[string]bool), installOptionsForUnit(depName, false)) {
+				continue
+			}
 			if shouldSkipFailedDependency(d) {
 				fmt.Printf("Skipping failed degradable dependency: %s\n", depName)
 				continue
@@ -998,7 +974,9 @@ func startUnit(unitName string, opts startOptions) bool {
 		fmt.Println(err)
 		return false
 	}
-	recursiveInstall(cleanName, make(map[string]bool), installOptionsForUnit(cleanName, false))
+	if !recursiveInstall(cleanName, make(map[string]bool), installOptionsForUnit(cleanName, false)) {
+		return false
+	}
 	return recursiveStart(cleanName, make(map[string]bool), opts)
 }
 
@@ -1013,7 +991,9 @@ func activateDBusUnit(unitName string) int {
 		fmt.Printf("Unit %s.service does not declare BusName=.\n", cleanName)
 		return 1
 	}
-	recursiveInstall(cleanName, make(map[string]bool), installOptionsForUnit(cleanName, false))
+	if !recursiveInstall(cleanName, make(map[string]bool), installOptionsForUnit(cleanName, false)) {
+		return 1
+	}
 	mode := managedServiceModeForUnit(unit, nil)
 	if !runDinitctl("start", managedServiceName(cleanName, mode)) {
 		return 1
@@ -1109,7 +1089,7 @@ func runDinitctl(args ...string) bool {
 }
 
 var runDinitctlFunc = func(args ...string) bool {
-	out, _, err := dinitctlOutput(args...)
+	out, _, err := nativeDinitCommand(args...)
 	if err != nil {
 		if out != "" {
 			fmt.Println(out)
@@ -1122,7 +1102,7 @@ var runDinitctlFunc = func(args ...string) bool {
 }
 
 func runDinitctlWithStatus(args ...string) int {
-	out, code, err := dinitctlOutput(args...)
+	out, code, err := nativeDinitCommand(args...)
 	if err == nil {
 		return 0
 	}
@@ -1137,24 +1117,17 @@ func runDinitctlWithStatus(args ...string) int {
 	return 1
 }
 
-func dinitctlCommand(args ...string) *exec.Cmd {
-	if userMode() {
-		args = append([]string{"--user"}, args...)
-	}
-	return exec.Command("dinitctl", args...)
-}
-
 func isDinitServiceKnown(name string) bool {
 	return isDinitServiceKnownFunc(name)
 }
 
 var isDinitServiceKnownFunc = func(name string) bool {
-	cmd := dinitctlCommand("status", name)
-	return cmd.Run() == nil
+	_, err := nativeDinitStatus(config.Mode, name)
+	return err == nil
 }
 
 func printList() int {
-	out, code, err := dinitctlOutput("list")
+	out, code, err := nativeDinitCommand("list")
 	if err != nil {
 		if out != "" {
 			fmt.Println(out)
@@ -1179,7 +1152,7 @@ func isActive(unitName string) int {
 }
 
 func isFailed(unitName string) int {
-	out, code, err := dinitctlOutput("is-failed", backendServiceNameForUnit(unitName))
+	out, code, err := nativeDinitCommand("is-failed", backendServiceNameForUnit(unitName))
 	if err == nil {
 		fmt.Println(statusColor("failed"))
 		return 0
@@ -1209,17 +1182,14 @@ func dinitPassthrough(args []string) int {
 		fmt.Println("Usage: servicectl [--user] dinit <args...>")
 		return 1
 	}
-	cmd := dinitctlCommand(args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	err := cmd.Run()
-	if err == nil {
-		return 0
+	out, code, err := nativeDinitCommand(args...)
+	if out != "" {
+		fmt.Println(out)
 	}
-	if exitErr, ok := err.(*exec.ExitError); ok {
-		return exitErr.ExitCode()
+	if err != nil {
+		fmt.Println(err)
 	}
-	return 1
+	return code
 }
 
 func installOptionsForUnit(unitName string, freshLoad bool) installOptions {
@@ -1262,7 +1232,7 @@ func ensureUserModeReady() error {
 	}
 	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
 
-	if err := dinitctlCommand("list").Run(); err == nil {
+	if _, _, err := nativeDinitCommand("list"); err == nil {
 		syncUserDinitEnvironment()
 		return migrateGeneratedLoggerDefinitions()
 	}
@@ -1270,7 +1240,7 @@ func ensureUserModeReady() error {
 		return err
 	}
 	for range 20 {
-		if err := dinitctlCommand("list").Run(); err == nil {
+		if _, _, err := nativeDinitCommand("list"); err == nil {
 			syncUserDinitEnvironment()
 			return migrateGeneratedLoggerDefinitions()
 		}
@@ -1342,7 +1312,7 @@ func startUserDinitInstance() error {
 	}
 	defer logFile.Close()
 
-	args := []string{"--user", "--container", "-b", "/", "-d", config.DinitServiceDir, "-d", config.DinitGenDir, "boot"}
+	args := []string{"--user", "--container", "-b", ".", "-d", config.DinitServiceDir, "-d", config.DinitGenDir, "boot"}
 	cmd := exec.Command("dinit", args...)
 	cmd.Env = environmentWithOverrides(os.Environ(), userSessionEnvDefaults())
 	cmd.Stdout = logFile

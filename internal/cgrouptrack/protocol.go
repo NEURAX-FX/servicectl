@@ -23,6 +23,8 @@ const (
 	OpGetUnit   Operation = "get-unit"
 	OpListPIDs  Operation = "list-pids"
 	OpAttach    Operation = "attach"
+	OpPrepare   Operation = "prepare"
+	OpRelease   Operation = "release"
 )
 
 type Request struct {
@@ -40,7 +42,7 @@ func (r Request) Validate() error {
 			return errors.New("operation does not accept unit or pid")
 		}
 		return validateScopeFields(r.Mode, r.UID)
-	case OpGetUnit, OpListPIDs:
+	case OpGetUnit, OpListPIDs, OpPrepare, OpRelease:
 		if r.PID != 0 {
 			return errors.New("operation does not accept pid")
 		}
