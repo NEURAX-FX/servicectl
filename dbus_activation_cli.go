@@ -239,8 +239,8 @@ func defaultDaemonPreflight(ctx context.Context, paths dbusActivationPaths) erro
 	if err != nil {
 		return fmt.Errorf("inspect D-Bus helper: %w", err)
 	}
-	if !info.Mode().IsRegular() || info.Mode()&(os.ModeSetgid|os.ModeSticky) != 0 || info.Mode().Perm() != 0o750 {
-		return fmt.Errorf("D-Bus helper must be a root-owned regular file with mode 0750 or 4750: %s", paths.HelperPath)
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSetuid == 0 || info.Mode()&(os.ModeSetgid|os.ModeSticky) != 0 || info.Mode().Perm() != 0o750 {
+		return fmt.Errorf("D-Bus helper must be a root-owned regular setuid file with mode 4750: %s", paths.HelperPath)
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || stat.Uid != 0 {

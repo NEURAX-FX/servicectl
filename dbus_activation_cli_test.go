@@ -239,20 +239,20 @@ func TestDefaultDaemonPreflightChecksCore(t *testing.T) {
 	if err := os.Chown(paths.HelperPath, 0, dbusGID); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(paths.HelperPath, 0o750); err != nil {
-		t.Fatal(err)
-	}
 	oldEUID := effectiveUID
 	oldPing := pingDBusActivationCore
-	t.Cleanup(func() {
-		effectiveUID = oldEUID
-		pingDBusActivationCore = oldPing
-	})
+	t.Cleanup(func() { effectiveUID = oldEUID; pingDBusActivationCore = oldPing })
 	effectiveUID = func() int { return 0 }
 	pinged := false
-	pingDBusActivationCore = func(context.Context, string) error {
-		pinged = true
-		return nil
+	pingDBusActivationCore = func(context.Context, string) error { pinged = true; return nil }
+	if err := defaultDaemonPreflight(context.Background(), paths); err == nil {
+		t.Fatal("preflight accepted a helper without the setuid bit required by dbus-daemon")
+	}
+	if pinged {
+		t.Fatal("preflight pinged core after rejecting helper mode")
+	}
+	if err := os.Chmod(paths.HelperPath, os.ModeSetuid|0o750); err != nil {
+		t.Fatal(err)
 	}
 	if err := defaultDaemonPreflight(context.Background(), paths); err != nil {
 		t.Fatal(err)
