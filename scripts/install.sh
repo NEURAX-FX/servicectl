@@ -127,7 +127,7 @@ if [[ "$SYSTEM_MODE" -eq 1 || "$INSTALL_SYSTEM_COPY" -eq 1 ]]; then
   printf 'Building sys-dbusd-daemon-helper\n'
   make -C "$ROOT/cmd/sys-dbusd-daemon-helper" clean all
   install -d -m 0755 /usr/local/libexec/servicectl
-  install -m 4750 -o root -g dbus "$ROOT/cmd/sys-dbusd-daemon-helper/sys-dbusd-daemon-helper" /usr/local/libexec/servicectl/sys-dbusd-daemon-helper
+	install -m 4750 -o root -g dbus "$ROOT/cmd/sys-dbusd-daemon-helper/sys-dbusd-daemon-helper" /usr/local/libexec/servicectl/sys-dbusd-daemon-helper
   install -d -m 0755 /usr/local/lib/servicectl/dbus-activation /usr/lib/systemd/system
   printf '%s\n' \
     '<busconfig>' \

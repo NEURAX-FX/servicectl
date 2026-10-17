@@ -10,7 +10,9 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -190,7 +192,27 @@ func peerIdentity(peer dbusactivation.Peer) (executableIdentity, error) {
 	return fileIdentity(peer.Executable)
 }
 
+func dbusUIDAndGID() (uint32, int, error) {
+	account, err := user.Lookup("dbus")
+	if err != nil {
+		return 0, 0, err
+	}
+	uid, err := strconv.ParseUint(account.Uid, 10, 32)
+	if err != nil {
+		return 0, 0, fmt.Errorf("parse dbus UID: %w", err)
+	}
+	gid, err := strconv.Atoi(account.Gid)
+	if err != nil {
+		return 0, 0, fmt.Errorf("parse dbus GID: %w", err)
+	}
+	return uint32(uid), gid, nil
+}
+
 func peerAuthorizer(cfg daemonConfig) (func(dbusactivation.Frontend, dbusactivation.Peer) error, error) {
+	dbusUID, _, err := dbusUIDAndGID()
+	if err != nil {
+		return nil, err
+	}
 	helperIdentity, err := fileIdentity(cfg.helperPath)
 	if err != nil {
 		return nil, fmt.Errorf("inspect daemon helper: %w", err)
@@ -199,8 +221,8 @@ func peerAuthorizer(cfg daemonConfig) (func(dbusactivation.Frontend, dbusactivat
 		var expected string
 		switch frontend {
 		case dbusactivation.FrontendDaemonHelper:
-			if peer.UID != 0 {
-				return fmt.Errorf("daemon helper uid %d is not root", peer.UID)
+			if peer.UID != 0 && peer.UID != dbusUID {
+				return fmt.Errorf("daemon helper uid %d is neither root nor dbus", peer.UID)
 			}
 			if cfg.daemonPID <= 0 || !containsPID(peer.Ancestors, cfg.daemonPID) {
 				return fmt.Errorf("daemon helper ancestry %v does not contain bus daemon pid %d", peer.Ancestors, cfg.daemonPID)
@@ -273,6 +295,10 @@ func run(cfg daemonConfig, logger *log.Logger) error {
 		return fmt.Errorf("invalid bus daemon pid %d", busPID)
 	}
 	cfg.daemonPID = int32(busPID)
+	_, dbusGID, err := dbusUIDAndGID()
+	if err != nil {
+		return fmt.Errorf("resolve dbus group: %w", err)
+	}
 	store := &indexStore{}
 	if err := store.load(cfg.serviceDirs); err != nil {
 		return err
@@ -306,13 +332,20 @@ func run(cfg daemonConfig, logger *log.Logger) error {
 	if err != nil {
 		return err
 	}
+	authorizePeer := func(frontend dbusactivation.Frontend, peer dbusactivation.Peer) error {
+		err := authorize(frontend, peer)
+		if err != nil {
+			logger.Printf("rejected activation peer frontend=%d pid=%d ppid=%d uid=%d exe=%q ancestors=%v: %v", frontend, peer.PID, peer.ParentPID, peer.UID, peer.Executable, peer.Ancestors, err)
+		}
+		return err
+	}
 	server := dbusactivation.NewServer(dbusactivation.ServerOptions{
 		Path:        cfg.controlPath,
-		Mode:        0o600,
-		GID:         -1,
+		Mode:        0o660,
+		GID:         dbusGID,
 		Activator:   engine,
 		Environment: environments,
-		Authorize:   authorize,
+		Authorize:   authorizePeer,
 		Reload: func() error {
 			return store.load(cfg.serviceDirs)
 		},

@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/user"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"testing"
 	"time"
 
@@ -73,17 +75,25 @@ func TestAuthorizePeerByFrontendAndExecutable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	dbusAccount, err := user.Lookup("dbus")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbusUID, err := strconv.ParseUint(dbusAccount.Uid, 10, 32)
+	if err != nil {
+		t.Fatal(err)
+	}
 	tests := []struct {
 		frontend dbusactivation.Frontend
 		peer     dbusactivation.Peer
 		wantErr  bool
 	}{
-		{dbusactivation.FrontendDaemonHelper, dbusactivation.Peer{UID: 0, ParentPID: 4300, Ancestors: []int32{4300, 4242}, Executable: cfg.helperPath}, false},
+		{dbusactivation.FrontendDaemonHelper, dbusactivation.Peer{UID: uint32(dbusUID), ParentPID: 4300, Ancestors: []int32{4300, 4242}, Executable: cfg.helperPath}, false},
 		{dbusactivation.FrontendAdmin, dbusactivation.Peer{UID: 0, Executable: cfg.adminPath}, false},
 		{dbusactivation.FrontendDaemonHelper, dbusactivation.Peer{UID: 1000, ParentPID: 4300, Ancestors: []int32{4300, 4242}, Executable: cfg.helperPath}, true},
 		{dbusactivation.FrontendDaemonHelper, dbusactivation.Peer{UID: 0, ParentPID: 4300, Ancestors: []int32{4300, 4242}, Executable: "/tmp/helper"}, true},
-		{dbusactivation.FrontendDaemonHelper, dbusactivation.Peer{UID: 0, ParentPID: 9999, Ancestors: []int32{9999, 1}, Executable: cfg.helperPath}, true},
-		{dbusactivation.FrontendAdmin, dbusactivation.Peer{UID: 0, Executable: cfg.helperPath}, true},
+		{dbusactivation.FrontendDaemonHelper, dbusactivation.Peer{UID: uint32(dbusUID), ParentPID: 9999, Ancestors: []int32{9999, 1}, Executable: cfg.helperPath}, true},
+		{dbusactivation.FrontendAdmin, dbusactivation.Peer{UID: dbusUIDValueForTest(t), Executable: cfg.helperPath}, true},
 	}
 	for _, tt := range tests {
 		err := authorize(tt.frontend, tt.peer)
@@ -91,6 +101,19 @@ func TestAuthorizePeerByFrontendAndExecutable(t *testing.T) {
 			t.Fatalf("authorize(%d, %#v) = %v", tt.frontend, tt.peer, err)
 		}
 	}
+}
+
+func dbusUIDValueForTest(t *testing.T) uint32 {
+	t.Helper()
+	account, err := user.Lookup("dbus")
+	if err != nil {
+		t.Fatal(err)
+	}
+	uid, err := strconv.ParseUint(account.Uid, 10, 32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return uint32(uid)
 }
 
 func TestAuthorizePeerRejectsReplacedExecutableAtExpectedPath(t *testing.T) {

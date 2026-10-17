@@ -206,7 +206,7 @@ func TestDefaultDaemonPreflightRejectsSymlinkHelper(t *testing.T) {
 	if err := os.WriteFile(target, []byte("helper"), 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(target, os.ModeSetuid|0o750); err != nil {
+	if err := os.Chmod(target, 0o750); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(target, paths.HelperPath); err != nil {
@@ -225,7 +225,7 @@ func TestDefaultDaemonPreflightChecksCore(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(paths.HelperPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(paths.HelperPath, []byte("helper"), 0o4750); err != nil {
+	if err := os.WriteFile(paths.HelperPath, []byte("helper"), 0o750); err != nil {
 		t.Fatal(err)
 	}
 	dbusGroup, err := user.LookupGroup("dbus")
@@ -239,7 +239,7 @@ func TestDefaultDaemonPreflightChecksCore(t *testing.T) {
 	if err := os.Chown(paths.HelperPath, 0, dbusGID); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(paths.HelperPath, os.ModeSetuid|0o750); err != nil {
+	if err := os.Chmod(paths.HelperPath, 0o750); err != nil {
 		t.Fatal(err)
 	}
 	oldEUID := effectiveUID

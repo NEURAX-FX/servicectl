@@ -208,7 +208,7 @@ static int check_invocation(void) {
     char parent_exe[4096];
     ssize_t n;
 
-    if (!dbus_user || getuid() != dbus_user->pw_uid || geteuid() != 0)
+    if (!dbus_user || getuid() != dbus_user->pw_uid || (geteuid() != 0 && geteuid() != dbus_user->pw_uid))
         return EXIT_PERMISSIONS_INVALID;
     snprintf(parent_link, sizeof(parent_link), "/proc/%ld/exe", (long)getppid());
     n = readlink(parent_link, parent_exe, sizeof(parent_exe) - 1);
@@ -240,7 +240,13 @@ static int connect_core(void) {
         close(fd);
         return -1;
     }
-    if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &peer, &peer_length) < 0 || peer.uid != 0) {
+    if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &peer, &peer_length) < 0) {
+        close(fd);
+        errno = EPERM;
+        return -1;
+    }
+    struct passwd *dbus_user = getpwnam("dbus");
+    if (!dbus_user || (peer.uid != 0 && peer.uid != dbus_user->pw_uid)) {
         close(fd);
         errno = EPERM;
         return -1;
